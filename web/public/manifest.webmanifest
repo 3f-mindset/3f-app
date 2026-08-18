@@ -1,0 +1,12 @@
+{
+  "name": "3F: Clean Burn",
+  "short_name": "3F",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f4f1e8",
+  "theme_color": "#141914",
+  "description": "A weekly operating system for honest self-calibration.",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

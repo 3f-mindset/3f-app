@@ -1,0 +1,38 @@
+name: threef
+
+services:
+  api:
+    build:
+      context: ./backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - api_venv:/app/.venv
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+    command: >-
+      uv run --frozen --extra dev uvicorn threef.app:app
+      --app-dir src --host 0.0.0.0 --port 8000 --reload
+
+  web:
+    build:
+      context: ./web
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./web:/app
+      - web_node_modules:/app/node_modules
+    environment:
+      CHOKIDAR_USEPOLLING: "true"
+      VITE_API_URL: "http://localhost:8000"
+    command: >-
+      sh -c 'npm ci && npm run dev -- --host 0.0.0.0'
+    depends_on:
+      api:
+        condition: service_started
+
+volumes:
+  api_venv:
+  web_node_modules:
