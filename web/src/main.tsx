@@ -3,15 +3,17 @@ import { createRoot } from "react-dom/client";
 import "./styles.css";
 
 const API = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
-const MEMBER_ID = "demo-member";
+const DEVELOPMENT_MODE = import.meta.env.DEV;
 
 type Strike = { action: string; measure: string };
 type Dashboard = {
-  name: string; coach_name: string; current_week: number; calibration_count: number;
+  name: string; role: "participant" | "coach" | "captain" | "administrator" | null; coach_name: string; current_week: number; calibration_count: number;
   season_plan: { season_name: string } | null;
   latest_calibration: { aim: string; momentum_level: string; role_to_forge: string; strikes: Strike[] } | null;
   latest_review: { feedback: string } | null;
+  direct_reports: DevelopmentAccount[];
 };
+type DevelopmentAccount = { member_id: string; name: string; role: "participant" | "coach" | "captain" | "administrator" };
 type ScaleItem = { value: string; level: number; label: string; definition: string };
 type OutboxItem = { id: string; endpoint: string; body: unknown };
 type DeckStep = { section: string; prompt: string; hint?: string; content: ReactNode };
@@ -120,6 +122,8 @@ function Deck({ eyebrow, steps, submitLabel, onSubmit }: { eyebrow: string; step
 function App() {
   const [screen, setScreen] = useState<"anvil" | "plan" | "calibration">("anvil");
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
+  const [accounts, setAccounts] = useState<DevelopmentAccount[]>([]);
+  const [activeMemberId, setActiveMemberId] = useState(() => localStorage.getItem("threef-development-account") ?? "demo-member");
   const [momentum, setMomentum] = useState<ScaleItem[]>([]);
   const [responsibility, setResponsibility] = useState<ScaleItem[]>([]);
   const [plan, setPlan] = useState(() => ({ ...defaultPlan, ...JSON.parse(localStorage.getItem("threef-plan-draft") ?? "{}") }));
@@ -127,9 +131,10 @@ function App() {
   const [notice, setNotice] = useState("");
   const [online, setOnline] = useState(navigator.onLine);
 
-  const refresh = () => fetch(`${API}/api/dashboard/${MEMBER_ID}`).then((response) => response.json()).then(setDashboard).catch(() => setNotice("Working offline. Your drafts are safe on this device."));
+  const refresh = () => fetch(`${API}/api/dashboard/${activeMemberId}`).then((response) => response.json()).then(setDashboard).catch(() => setNotice("Working offline. Your drafts are safe on this device."));
   useEffect(() => {
     refresh();
+    if (DEVELOPMENT_MODE) fetch(`${API}/api/development/accounts`).then((response) => response.ok ? response.json() : []).then(setAccounts).catch(() => undefined);
     fetch(`${API}/api/reference/scales`).then((response) => response.json()).then((data) => { setMomentum(data.momentum); setResponsibility(data.responsibility); }).catch(() => undefined);
     const reconnect = () => {
       setOnline(true);
@@ -143,7 +148,7 @@ function App() {
     window.addEventListener("online", reconnect); window.addEventListener("offline", disconnect);
     if ("serviceWorker" in navigator) void navigator.serviceWorker.register("/sw.js");
     return () => { window.removeEventListener("online", reconnect); window.removeEventListener("offline", disconnect); };
-  }, []);
+  }, [activeMemberId]);
 
   const updatePlan = (key: string, value: string) => { const next = { ...plan, [key]: value }; setPlan(next); localStorage.setItem("threef-plan-draft", JSON.stringify(next)); };
   const updateRead = (key: string, value: string) => { const next = { ...read, [key]: value }; setRead(next); localStorage.setItem("threef-read-draft", JSON.stringify(next)); };
@@ -151,17 +156,19 @@ function App() {
     try { await send(item); setNotice(success); refresh(); setScreen(destination); } catch { queue(item); setNotice("Saved offline. It will synchronize when you reconnect."); setScreen(destination); }
   };
   const submitPlan = () => {
-    const body = { command_id: commandId(), member_id: MEMBER_ID, season_name: plan.season_name, review_day: plan.review_day, review_time: plan.review_time, timezone: plan.timezone, roles: split(plan.roles), values: split(plan.values), domains: [{ name: plan.domain, current_reality: plan.current_reality, outcome: plan.outcome, protected_time: plan.protected_time, action: plan.action, boundary: plan.boundary, evidence: plan.evidence, weekly_actions: split(plan.weekly_actions), scoreboard_measure: plan.scoreboard_measure }], eliminations: [{ action: plan.elimination_action, commitment: plan.elimination }] };
+    const body = { command_id: commandId(), member_id: activeMemberId, season_name: plan.season_name, review_day: plan.review_day, review_time: plan.review_time, timezone: plan.timezone, roles: split(plan.roles), values: split(plan.values), domains: [{ name: plan.domain, current_reality: plan.current_reality, outcome: plan.outcome, protected_time: plan.protected_time, action: plan.action, boundary: plan.boundary, evidence: plan.evidence, weekly_actions: split(plan.weekly_actions), scoreboard_measure: plan.scoreboard_measure }], eliminations: [{ action: plan.elimination_action, commitment: plan.elimination }] };
     void deliver({ id: body.command_id, endpoint: "/api/season-plans", body }, "Season Plan submitted for Coach review.", "anvil");
   };
   const submitCalibration = () => {
     const strikes = [{ action: read.strike_one, measure: read.measure_one }, { action: read.strike_two, measure: read.measure_two }].filter((strike) => strike.action && strike.measure);
-    const body = { command_id: commandId(), member_id: MEMBER_ID, week: dashboard?.current_week ?? 1, aim: read.aim, momentum_level: read.momentum_level, momentum_evidence: read.momentum_evidence, meaningful_moment: read.meaningful_moment, why_it_mattered: read.why_it_mattered, value_in_focus: read.value_in_focus, value_most_neglected: read.value_most_neglected, role_reads: [{ role: read.role, level: read.responsibility_level, evidence: read.responsibility_evidence }], avoided: read.avoided, drain: read.drain, unreleased_weight: read.unreleased_weight, role_to_forge: read.role_to_forge, strikes, scoreboard: { [plan.domain]: "green" } };
+    const body = { command_id: commandId(), member_id: activeMemberId, week: dashboard?.current_week ?? 1, aim: read.aim, momentum_level: read.momentum_level, momentum_evidence: read.momentum_evidence, meaningful_moment: read.meaningful_moment, why_it_mattered: read.why_it_mattered, value_in_focus: read.value_in_focus, value_most_neglected: read.value_most_neglected, role_reads: [{ role: read.role, level: read.responsibility_level, evidence: read.responsibility_evidence }], avoided: read.avoided, drain: read.drain, unreleased_weight: read.unreleased_weight, role_to_forge: read.role_to_forge, strikes, scoreboard: { [plan.domain]: "green" } };
     void deliver({ id: body.command_id, endpoint: "/api/calibrations", body }, "Your calibration is recorded. Protect the next strike.", "anvil");
   };
 
   const planRoles = split(plan.roles);
   const planValues = split(plan.values);
+  const isParticipant = dashboard?.role === "participant";
+  const switchAccount = (memberId: string) => { localStorage.setItem("threef-development-account", memberId); setActiveMemberId(memberId); setScreen("anvil"); setNotice(""); };
   const planSteps: DeckStep[] = [
     { section: "The season", prompt: "What will you call this 12-week season?", hint: "Choose a name for the kind of man you are becoming.", content: <label>Season name<Field value={plan.season_name} onChange={(value) => updatePlan("season_name", value)} /></label> },
     { section: "Your stewardship", prompt: "Which roles are you carrying this season?", hint: "Choose the roles that need your deliberate attention. Select all that apply.", content: <ChipPicker options={ROLE_OPTIONS} selected={split(plan.roles)} onChange={(selected) => updatePlan("roles", selected.join(", "))} /> },
@@ -185,9 +192,10 @@ function App() {
 
   return <main>
     <header><div className="brand"><span className="mark">3F</span><div><strong>Clean Burn</strong><small>Read. Tell the truth. Strike.</small></div></div><div className={`connection ${online ? "online" : "offline"}`}>{online ? "Online" : "Offline"}</div></header>
-    <nav><button className={screen === "anvil" ? "active" : ""} onClick={() => setScreen("anvil")}>Anvil</button><button className={screen === "plan" ? "active" : ""} onClick={() => setScreen("plan")}>Season Plan</button><button className={screen === "calibration" ? "active" : ""} onClick={() => setScreen("calibration")}>Weekly Calibration</button></nav>
+    {DEVELOPMENT_MODE && accounts.length > 0 && <label className="account-switcher"><span>Development account</span><select value={activeMemberId} onChange={(event) => switchAccount(event.target.value)}>{accounts.map((account) => <option value={account.member_id} key={account.member_id}>{account.name} · {account.role}</option>)}</select></label>}
+    <nav><button className={screen === "anvil" ? "active" : ""} onClick={() => setScreen("anvil")}>Anvil</button>{isParticipant && <button className={screen === "plan" ? "active" : ""} onClick={() => setScreen("plan")}>Season Plan</button>}{isParticipant && <button className={screen === "calibration" ? "active" : ""} onClick={() => setScreen("calibration")}>Weekly Calibration</button>}</nav>
     {notice && <aside className="notice">{notice}</aside>}
-    {screen === "anvil" && <section className="home"><p className="eyebrow">{dashboard?.season_plan?.season_name ?? "Your 12-week season"}</p><h1>{dashboard ? `The Anvil, ${dashboard.name}.` : "The Anvil."}</h1><p className="lead">A clear read on what you are feeding, holding, and releasing.</p><div className="cards"><article><span>Current week</span><strong>{dashboard?.current_week ?? 1} / 12</strong><p>{dashboard?.calibration_count ?? 0} calibrations recorded</p></article><article><span>Coach</span><strong>{dashboard?.coach_name ?? "Loading..."}</strong><p>{dashboard?.latest_review ? "Latest feedback is ready" : "Your witness in the work"}</p></article><article><span>Next strike</span><strong>{dashboard?.latest_calibration?.strikes?.[0]?.action ?? "Build your Season Plan"}</strong><p>{dashboard?.latest_calibration?.role_to_forge ? `Forge: ${dashboard.latest_calibration.role_to_forge}` : "Start with stewardship"}</p></article></div>{dashboard?.latest_calibration && <article className="read-summary"><p className="eyebrow">Last calibration</p><h2>{dashboard.latest_calibration.aim}</h2><p>Furnace read: <b>{dashboard.latest_calibration.momentum_level.replace("_", " ")}</b></p>{dashboard.latest_review && <blockquote>{dashboard.latest_review.feedback}</blockquote>}</article>}<button className="primary" onClick={() => setScreen(dashboard?.season_plan ? "calibration" : "plan")}>{dashboard?.season_plan ? "Begin weekly calibration" : "Build the season plan"}</button></section>}
+    {screen === "anvil" && <section className="home"><p className="eyebrow">{dashboard?.role ?? "Account"} · {dashboard?.season_plan?.season_name ?? "The Stewardship Season"}</p><h1>{dashboard ? `The Anvil, ${dashboard.name}.` : "The Anvil."}</h1><p className="lead">{isParticipant ? "A clear read on what you are feeding, holding, and releasing." : "A development view of the people and responsibilities entrusted to you."}</p>{isParticipant ? <><div className="cards"><article><span>Current week</span><strong>{dashboard?.current_week ?? 1} / 12</strong><p>{dashboard?.calibration_count ?? 0} calibrations recorded</p></article><article><span>Coach</span><strong>{dashboard?.coach_name ?? "Loading..."}</strong><p>{dashboard?.latest_review ? "Latest feedback is ready" : "Your witness in the work"}</p></article><article><span>Next strike</span><strong>{dashboard?.latest_calibration?.strikes?.[0]?.action ?? "Build your Season Plan"}</strong><p>{dashboard?.latest_calibration?.role_to_forge ? `Forge: ${dashboard.latest_calibration.role_to_forge}` : "Start with stewardship"}</p></article></div>{dashboard?.latest_calibration && <article className="read-summary"><p className="eyebrow">Last calibration</p><h2>{dashboard.latest_calibration.aim}</h2><p>Furnace read: <b>{dashboard.latest_calibration.momentum_level.replace("_", " ")}</b></p>{dashboard.latest_review && <blockquote>{dashboard.latest_review.feedback}</blockquote>}</article>}<button className="primary" onClick={() => setScreen(dashboard?.season_plan ? "calibration" : "plan")}>{dashboard?.season_plan ? "Begin weekly calibration" : "Build the season plan"}</button></> : <><div className="cards"><article><span>Role</span><strong>{dashboard?.role}</strong><p>Development account view</p></article><article><span>Direct reports</span><strong>{dashboard?.direct_reports.length ?? 0}</strong><p>{dashboard?.role === "coach" ? "Participants assigned to you" : "Coaches assigned to you"}</p></article></div><section className="report-list"><p className="eyebrow">Your people</p>{dashboard?.direct_reports.length ? dashboard.direct_reports.map((report) => <article key={report.member_id}><strong>{report.name}</strong><span>{report.role}</span></article>) : <p className="lead">No direct reports are assigned yet.</p>}</section></>}</section>}
     {screen === "plan" && <Deck eyebrow="Season Plan" steps={planSteps} submitLabel="Submit season plan" onSubmit={submitPlan} />}
     {screen === "calibration" && <Deck eyebrow={`Week ${dashboard?.current_week ?? 1} · Weekly Calibration`} steps={calibrationSteps} submitLabel="Submit calibration" onSubmit={submitCalibration} />}
   </main>;

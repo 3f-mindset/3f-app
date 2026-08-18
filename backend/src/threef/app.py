@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+import os
 from threading import Lock
 from typing import Any, Callable
 from uuid import uuid4
@@ -459,16 +460,30 @@ class ApplicationService:
         member = self.member_or_404(member_id)
         latest = member.calibrations[-1] if member.calibrations else None
         current_week = (latest["week"] + 1) if latest and latest["week"] < 12 else (latest["week"] if latest else 1)
+        direct_reports = [
+            {"member_id": candidate.member_id, "name": candidate.name, "role": candidate.role.value if candidate.role else None}
+            for candidate in self.read_model.members.values()
+            if (member.role == ProgramRole.COACH and candidate.coach_id == member_id)
+            or (member.role == ProgramRole.CAPTAIN and candidate.captain_id == member_id)
+        ]
         return {
             "member_id": member.member_id,
             "name": member.name,
+            "role": member.role.value if member.role else None,
             "coach_name": member.coach_name,
             "season_plan": member.season_plan,
             "latest_calibration": latest,
             "latest_review": member.reviews.get(latest["week"]) if latest else None,
             "current_week": current_week,
             "calibration_count": len(member.calibrations),
+            "direct_reports": direct_reports,
         }
+
+    def development_accounts(self) -> list[dict[str, str]]:
+        return [
+            {"member_id": member.member_id, "name": member.name, "role": member.role.value}
+            for member in self.read_model.members.values() if member.role is not None
+        ]
 
     def member_or_404(self, member_id: str) -> MemberProjection:
         if member_id not in self.read_model.members:
@@ -497,12 +512,13 @@ class ApplicationService:
         return {"crucible": crucible, "members": members, "circles": circles, "channels": channels}
 
 
-def create_app() -> FastAPI:
+def create_app(development_mode: bool | None = None) -> FastAPI:
     app = FastAPI(title="3F API", version="0.1.0")
     app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
     service = ApplicationService(EventStore(), ReadModel())
     service.seed()
     app.state.service = service
+    app.state.development_mode = development_mode if development_mode is not None else os.getenv("THREEF_DEVELOPMENT_MODE", "true").lower() == "true"
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -518,6 +534,12 @@ def create_app() -> FastAPI:
     @app.get("/api/dashboard/{member_id}")
     def dashboard(member_id: str) -> dict[str, Any]:
         return service.dashboard(member_id)
+
+    @app.get("/api/development/accounts")
+    def development_accounts() -> list[dict[str, str]]:
+        if not app.state.development_mode:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found.")
+        return service.development_accounts()
 
     @app.post("/api/crucibles", status_code=status.HTTP_201_CREATED)
     def create_crucible(command: CreateCrucibleCommand) -> dict[str, Any]:

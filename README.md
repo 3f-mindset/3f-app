@@ -30,6 +30,12 @@ uv run uvicorn threef.app:app --app-dir src --reload
 
 The local API seeds a participant named Marcus at `demo-member`. Build the browser bundle outside Docker with `cd web && npm run build`.
 
+### Development Account Switcher
+
+The Compose development environment sets `THREEF_DEVELOPMENT_MODE=true`. The PWA then displays a local-only account switcher for the seeded Participant, Coach, and Captain accounts. It is intended solely for reviewing role-specific UI while authentication is not yet implemented.
+
+Set `THREEF_DEVELOPMENT_MODE=false` outside development. This disables the `/api/development/accounts` endpoint and removes the switcher from a production browser build.
+
 ## The Why
 
 Most men do not lack effort. They lack a way to measure themselves honestly.

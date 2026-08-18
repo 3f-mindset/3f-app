@@ -10,6 +10,7 @@ services:
       - ./backend:/app
       - api_venv:/app/.venv
     environment:
+      THREEF_DEVELOPMENT_MODE: "true"
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUNBUFFERED: "1"
     command: >-

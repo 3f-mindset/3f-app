@@ -73,6 +73,19 @@ def test_calibration_requires_plan() -> None:
     assert response.status_code == 409
 
 
+def test_development_account_switcher_projection() -> None:
+    client = TestClient(create_app(development_mode=True))
+    accounts = client.get("/api/development/accounts").json()
+    assert {(account["name"], account["role"]) for account in accounts} == {
+        ("Marcus", "participant"), ("Coach Elias", "coach"), ("Captain Silas", "captain")
+    }
+    coach_dashboard = client.get("/api/dashboard/coach-elias").json()
+    assert coach_dashboard["role"] == "coach"
+    assert coach_dashboard["direct_reports"] == [{"member_id": "demo-member", "name": "Marcus", "role": "participant"}]
+    production_client = TestClient(create_app(development_mode=False))
+    assert production_client.get("/api/development/accounts").status_code == 404
+
+
 def test_crucible_relationships_and_channel_boundaries() -> None:
     client = TestClient(create_app())
     assert client.post("/api/crucibles", json={
