@@ -439,8 +439,9 @@ The local event-sourced API now supports the foundation of this milestone:
 - `POST /api/crucibles/{crucible_id}/channels` for explicit channel membership.
 - `POST /api/season-plans`, `POST /api/calibrations`, and `POST /api/calibrations/{member_id}/{week}/review` for the participant submission and Coach review loop.
 - `GET /api/coaches/{coach_id}/participants/{participant_id}` for an assigned Coach's full submitted calibration record; unassigned relationships are rejected.
+- `GET /api/captains/{captain_id}/coaches/{coach_id}/status` for an assigned Captain's Coach completion and review-state projection. It returns roster names, plan/submission/review state, and aggregate counts only, never participant calibration or feedback content.
 
-The POC validates that buddy pairs have two members, triads have three, Coach sponsors are Coaches in the same Crucible, circle channels match their circle membership, and participant-private channels exclude Coaches and Captains.
+The POC validates that buddy pairs have two members, triads have three, Coach sponsors are Coaches in the same Crucible, circle channels match their circle membership, participant-private channels exclude Coaches and Captains, and Captain visibility is limited to assigned Coach status without participant calibration content.
 
 In the PWA, a Coach selects **Coach review** in the Anvil, opens an assigned participant's submitted calibration, sees each of the six 3F sections, then sends participant-visible feedback or requests a revision. The review is stored as a `WeeklyCalibrationReviewed` event.
 

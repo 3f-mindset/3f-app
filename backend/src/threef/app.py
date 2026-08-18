@@ -499,6 +499,45 @@ class ApplicationService:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Coach is not assigned to this participant.")
         return {"participant": self.dashboard(participant_id)}
 
+    def captain_coach_status(self, captain_id: str, coach_id: str) -> dict[str, Any]:
+        captain = self.member_or_404(captain_id)
+        coach = self.member_or_404(coach_id)
+        if (
+            captain.role != ProgramRole.CAPTAIN
+            or coach.role != ProgramRole.COACH
+            or coach.captain_id != captain_id
+        ):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Captain is not assigned to this Coach.")
+
+        participants = []
+        for participant in self.read_model.members.values():
+            if participant.coach_id != coach_id:
+                continue
+            latest = participant.calibrations[-1] if participant.calibrations else None
+            review = participant.reviews.get(latest["week"]) if latest else None
+            review_status = (
+                "revision_requested" if review and review["request_revision"]
+                else "reviewed" if review
+                else "awaiting_review" if latest
+                else "not_submitted"
+            )
+            participants.append({
+                "member_id": participant.member_id,
+                "name": participant.name,
+                "season_plan_status": "submitted" if participant.season_plan else "not_submitted",
+                "calibration": {"week": latest["week"], "review_status": review_status} if latest else None,
+            })
+        return {
+            "coach": {"member_id": coach.member_id, "name": coach.name},
+            "summary": {
+                "participant_count": len(participants),
+                "plans_submitted": sum(item["season_plan_status"] == "submitted" for item in participants),
+                "calibrations_submitted": sum(item["calibration"] is not None for item in participants),
+                "calibrations_reviewed": sum(item["calibration"] is not None and item["calibration"]["review_status"] != "awaiting_review" for item in participants),
+            },
+            "participants": participants,
+        }
+
     def member_or_404(self, member_id: str) -> MemberProjection:
         if member_id not in self.read_model.members:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found.")
@@ -558,6 +597,10 @@ def create_app(development_mode: bool | None = None) -> FastAPI:
     @app.get("/api/coaches/{coach_id}/participants/{participant_id}")
     def coach_participant_record(coach_id: str, participant_id: str) -> dict[str, Any]:
         return service.coach_participant_record(coach_id, participant_id)
+
+    @app.get("/api/captains/{captain_id}/coaches/{coach_id}/status")
+    def captain_coach_status(captain_id: str, coach_id: str) -> dict[str, Any]:
+        return service.captain_coach_status(captain_id, coach_id)
 
     @app.post("/api/crucibles", status_code=status.HTTP_201_CREATED)
     def create_crucible(command: CreateCrucibleCommand) -> dict[str, Any]:

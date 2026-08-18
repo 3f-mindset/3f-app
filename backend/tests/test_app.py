@@ -119,6 +119,46 @@ def test_development_account_switcher_projection() -> None:
     assert production_client.get("/api/development/accounts").status_code == 404
 
 
+def test_captain_can_only_view_assigned_coach_status_without_calibration_content() -> None:
+    client = TestClient(create_app())
+    assert client.post("/api/season-plans", json=plan_payload()).status_code == 201
+    assert client.post("/api/calibrations", json=calibration_payload()).status_code == 201
+
+    status_record = client.get("/api/captains/captain-silas/coaches/coach-elias/status")
+    assert status_record.status_code == 200
+    record = status_record.json()
+    assert record["coach"] == {"member_id": "coach-elias", "name": "Coach Elias"}
+    assert record["summary"] == {
+        "participant_count": 1,
+        "plans_submitted": 1,
+        "calibrations_submitted": 1,
+        "calibrations_reviewed": 0,
+    }
+    assert record["participants"] == [{
+        "member_id": "demo-member",
+        "name": "Marcus",
+        "season_plan_status": "submitted",
+        "calibration": {"week": 1, "review_status": "awaiting_review"},
+    }]
+    serialized = str(record)
+    assert "Build a life ordered" not in serialized
+    assert "unreleased_weight" not in serialized
+    assert "strikes" not in serialized
+
+    assert client.post("/api/calibrations/demo-member/1/review", json={
+        "command_id": "captain-status-review", "coach_id": "coach-elias", "feedback": "Keep protecting the conversation you cleared.",
+    }).status_code == 201
+    reviewed = client.get("/api/captains/captain-silas/coaches/coach-elias/status").json()
+    assert reviewed["summary"]["calibrations_reviewed"] == 1
+    assert reviewed["participants"][0]["calibration"]["review_status"] == "reviewed"
+
+    assert client.post("/api/crucibles/demo-crucible/members", json={
+        "command_id": "other-captain", "member_id": "captain-judah", "name": "Captain Judah", "role": "captain",
+    }).status_code == 201
+    assert client.get("/api/captains/captain-judah/coaches/coach-elias/status").status_code == 403
+    assert client.get("/api/captains/captain-silas/coaches/demo-member/status").status_code == 403
+
+
 def test_crucible_relationships_and_channel_boundaries() -> None:
     client = TestClient(create_app())
     assert client.post("/api/crucibles", json={

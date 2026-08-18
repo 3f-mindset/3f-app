@@ -20,6 +20,11 @@ type Dashboard = {
   direct_reports: DevelopmentAccount[];
 };
 type DevelopmentAccount = { member_id: string; name: string; role: "participant" | "coach" | "captain" | "administrator" };
+type CaptainCoachStatus = {
+  coach: { member_id: string; name: string };
+  summary: { participant_count: number; plans_submitted: number; calibrations_submitted: number; calibrations_reviewed: number };
+  participants: { member_id: string; name: string; season_plan_status: string; calibration: { week: number; review_status: "awaiting_review" | "reviewed" | "revision_requested" } | null }[];
+};
 type ScaleItem = { value: string; level: number; label: string; definition: string };
 type OutboxItem = { id: string; endpoint: string; body: unknown };
 type DeckStep = { section: string; prompt: string; hint?: string; content: ReactNode };
@@ -156,10 +161,16 @@ function ParticipantReview({ review }: { review: NonNullable<Dashboard["latest_r
   </article>;
 }
 
+function CaptainVisibility({ records }: { records: CaptainCoachStatus[] }) {
+  if (records.length === 0) return <section className="record-list"><p className="eyebrow">Coach visibility</p><p>No Coaches are assigned to you yet.</p></section>;
+  return <section className="record-list"><p className="eyebrow">Coach visibility</p>{records.map((record) => <article key={record.coach.member_id}><div><strong>{record.coach.name}</strong><span>{record.summary.participant_count} participant{record.summary.participant_count === 1 ? "" : "s"}</span></div><dl><div><dt>Plans</dt><dd>{record.summary.plans_submitted} / {record.summary.participant_count}</dd></div><div><dt>Submitted</dt><dd>{record.summary.calibrations_submitted} / {record.summary.participant_count}</dd></div><div><dt>Reviewed</dt><dd>{record.summary.calibrations_reviewed} / {record.summary.calibrations_submitted}</dd></div></dl>{record.participants.map((participant) => <p key={participant.member_id}><b>{participant.name}</b> · {participant.calibration ? `Week ${participant.calibration.week} · ${participant.calibration.review_status.replace("_", " ")}` : "No calibration submitted"}</p>)}</article>)}</section>;
+}
+
 function App() {
   const [screen, setScreen] = useState<"anvil" | "plan" | "calibration" | "coach-review">("anvil");
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [coachRecords, setCoachRecords] = useState<Dashboard[]>([]);
+  const [captainRecords, setCaptainRecords] = useState<CaptainCoachStatus[]>([]);
   const [accounts, setAccounts] = useState<DevelopmentAccount[]>([]);
   const [activeMemberId, setActiveMemberId] = useState(() => localStorage.getItem("threef-development-account") ?? "demo-member");
   const [momentum, setMomentum] = useState<ScaleItem[]>([]);
@@ -195,6 +206,12 @@ function App() {
     void Promise.all(dashboard.direct_reports.map((report) => fetch(`${API}/api/coaches/${activeMemberId}/participants/${report.member_id}`).then((response) => response.ok ? response.json() : null)))
       .then((records) => setCoachRecords(records.filter(Boolean).map((record) => record.participant as Dashboard)))
       .catch(() => setNotice("Student records are unavailable while offline."));
+  }, [activeMemberId, dashboard]);
+  useEffect(() => {
+    if (dashboard?.role !== "captain") { setCaptainRecords([]); return; }
+    void Promise.all(dashboard.direct_reports.map((report) => fetch(`${API}/api/captains/${activeMemberId}/coaches/${report.member_id}/status`).then((response) => response.ok ? response.json() : null)))
+      .then((records) => setCaptainRecords(records.filter(Boolean) as CaptainCoachStatus[]))
+      .catch(() => setNotice("Coach status records are unavailable while offline."));
   }, [activeMemberId, dashboard]);
 
   const updatePlan = (key: string, value: string) => { const next = { ...plan, [key]: value }; setPlan(next); localStorage.setItem("threef-plan-draft", JSON.stringify(next)); };
@@ -261,6 +278,7 @@ function App() {
     <nav><button className={screen === "anvil" ? "active" : ""} onClick={() => setScreen("anvil")}>Anvil</button>{isParticipant && <button className={screen === "plan" ? "active" : ""} onClick={() => setScreen("plan")}>Season Plan</button>}{isParticipant && <button className={screen === "calibration" ? "active" : ""} onClick={() => setScreen("calibration")}>Weekly Calibration</button>}{dashboard?.role === "coach" && <button className={screen === "coach-review" ? "active" : ""} onClick={() => setScreen("coach-review")}>Coach review</button>}</nav>
     {notice && <aside className="notice">{notice}</aside>}
     {screen === "anvil" && isParticipant && dashboard?.latest_review && <ParticipantReview review={dashboard.latest_review} />}
+    {screen === "anvil" && dashboard?.role === "captain" && <CaptainVisibility records={captainRecords} />}
     {screen === "anvil" && <section className="home"><p className="eyebrow">{dashboard?.role ?? "Account"} · {dashboard?.season_plan?.season_name ?? "The Stewardship Season"}</p><h1>{dashboard ? `The Anvil, ${dashboard.name}.` : "The Anvil."}</h1><p className="lead">{isParticipant ? "A clear read on what you are feeding, holding, and releasing." : "A development view of the people and responsibilities entrusted to you."}</p>{isParticipant ? <><div className="cards"><article><span>Current week</span><strong>{dashboard?.current_week ?? 1} / 12</strong><p>{dashboard?.calibration_count ?? 0} calibrations recorded</p></article><article><span>Coach</span><strong>{dashboard?.coach_name ?? "Loading..."}</strong><p>{dashboard?.latest_review ? "Latest feedback is ready" : "Your witness in the work"}</p></article><article><span>Next strike</span><strong>{dashboard?.latest_calibration?.strikes?.[0]?.action ?? "Build your Season Plan"}</strong><p>{dashboard?.latest_calibration?.role_to_forge ? `Forge: ${dashboard.latest_calibration.role_to_forge}` : "Start with stewardship"}</p></article></div>{dashboard?.latest_calibration && <article className="read-summary"><p className="eyebrow">Last calibration</p><h2>{dashboard.latest_calibration.aim}</h2><p>Furnace read: <b>{dashboard.latest_calibration.momentum_level.replace("_", " ")}</b></p>{dashboard.latest_review && <blockquote>{dashboard.latest_review.feedback}</blockquote>}</article>}<button className="primary" onClick={() => setScreen(dashboard?.season_plan ? "calibration" : "plan")}>{dashboard?.season_plan ? "Begin weekly calibration" : "Build the season plan"}</button></> : <><div className="cards"><article><span>Role</span><strong>{dashboard?.role}</strong><p>Development account view</p></article><article><span>Direct reports</span><strong>{dashboard?.direct_reports.length ?? 0}</strong><p>{dashboard?.role === "coach" ? "Participants assigned to you" : "Coaches assigned to you"}</p></article></div>{dashboard?.role === "coach" ? <section className="record-list"><p className="eyebrow">Student records</p>{coachRecords.length ? coachRecords.map((record) => <article key={record.member_id}><div><strong>{record.name}</strong><span>{record.season_plan?.season_name ?? "Season Plan not submitted"}</span></div><dl><div><dt>Calibrations</dt><dd>{record.calibration_count}</dd></div><div><dt>Current week</dt><dd>{record.current_week} / 12</dd></div></dl>{record.latest_calibration ? <p><b>Latest aim:</b> {record.latest_calibration.aim}</p> : <p>No weekly calibration submitted yet.</p>}</article>) : <p className="lead">Loading assigned student records...</p>}</section> : <section className="report-list"><p className="eyebrow">Your people</p>{dashboard?.direct_reports.length ? dashboard.direct_reports.map((report) => <article key={report.member_id}><strong>{report.name}</strong><span>{report.role}</span></article>) : <p className="lead">No direct reports are assigned yet.</p>}</section>}</>}</section>}
     {screen === "plan" && <Deck eyebrow="Season Plan" steps={planSteps} submitLabel="Submit season plan" onSubmit={submitPlan} />}
     {screen === "calibration" && <Deck eyebrow={`Week ${dashboard?.current_week ?? 1} · Weekly Calibration`} steps={calibrationSteps} submitLabel="Submit calibration" onSubmit={submitCalibration} />}
