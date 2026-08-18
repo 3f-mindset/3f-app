@@ -106,7 +106,7 @@ def test_development_account_switcher_projection() -> None:
     client = TestClient(create_app(development_mode=True))
     accounts = client.get("/api/development/accounts").json()
     assert {(account["name"], account["role"]) for account in accounts} == {
-        ("Marcus", "participant"), ("Coach Elias", "coach"), ("Captain Silas", "captain")
+        ("Administrator Amos", "administrator"), ("Marcus", "participant"), ("Coach Elias", "coach"), ("Captain Silas", "captain")
     }
     coach_dashboard = client.get("/api/dashboard/coach-elias").json()
     assert coach_dashboard["role"] == "coach"

@@ -56,9 +56,15 @@ Iteration logs are written to `ralph/runs/` and ignored by Git. Read `ralph/PROM
 
 ### Development Account Switcher
 
-The Compose development environment sets `THREEF_DEVELOPMENT_MODE=true`. The PWA then displays a local-only account switcher for the seeded Participant, Coach, and Captain accounts. It is intended solely for reviewing role-specific UI while authentication is not yet implemented.
+The Compose development environment sets `THREEF_DEVELOPMENT_MODE=true`. The PWA then displays a local-only account switcher for the seeded Participant, Coach, Captain, and Administrator accounts. It is intended solely for reviewing role-specific UI while authentication is not yet implemented.
 
 Set `THREEF_DEVELOPMENT_MODE=false` outside development. This disables the `/api/development/accounts` endpoint and removes the switcher from a production browser build.
+
+### Development Administrator Setup
+
+Select **Administrator Amos** from the development account switcher, then open **Setup**. The local-only workspace creates a Crucible, enrolls its members, creates Coach or Captain assignments, and creates circles and channels through the same API commands used by the application. It keeps each action explicit so the API validates the required membership and relationship boundaries.
+
+Create a Crucible before enrolling members. Create all members before assignments, circles, or channels. Circle channels must exactly match the circle members and optional Coach sponsor; participant-private channels may contain Participants only.
 
 ### Participant Review Feedback
 

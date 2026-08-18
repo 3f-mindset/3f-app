@@ -1,4 +1,4 @@
-import { CSSProperties, ReactNode, useEffect, useState } from "react";
+import { CSSProperties, FormEvent, ReactNode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
@@ -166,8 +166,38 @@ function CaptainVisibility({ records }: { records: CaptainCoachStatus[] }) {
   return <section className="record-list"><p className="eyebrow">Coach visibility</p>{records.map((record) => <article key={record.coach.member_id}><div><strong>{record.coach.name}</strong><span>{record.summary.participant_count} participant{record.summary.participant_count === 1 ? "" : "s"}</span></div><dl><div><dt>Plans</dt><dd>{record.summary.plans_submitted} / {record.summary.participant_count}</dd></div><div><dt>Submitted</dt><dd>{record.summary.calibrations_submitted} / {record.summary.participant_count}</dd></div><div><dt>Reviewed</dt><dd>{record.summary.calibrations_reviewed} / {record.summary.calibrations_submitted}</dd></div></dl>{record.participants.map((participant) => <p key={participant.member_id}><b>{participant.name}</b> · {participant.calibration ? `Week ${participant.calibration.week} · ${participant.calibration.review_status.replace("_", " ")}` : "No calibration submitted"}</p>)}</article>)}</section>;
 }
 
+function AdministratorSetup({ onNotice, onAccountsChanged }: { onNotice: (message: string) => void; onAccountsChanged: () => void }) {
+  const [crucibleId, setCrucibleId] = useState("pilot-crucible");
+  const [crucible, setCrucible] = useState({ name: "Pilot Crucible", review_week_start: "2026-09-01", refinement_week_start: "2026-09-08", launch_date: "2026-09-15" });
+  const [member, setMember] = useState({ member_id: "", name: "", role: "participant" });
+  const [relationship, setRelationship] = useState({ kind: "coach", member_id: "", mentor_id: "" });
+  const [circle, setCircle] = useState({ circle_id: "", name: "", kind: "small_group", member_ids: "", coach_sponsor_id: "" });
+  const [channel, setChannel] = useState({ channel_id: "", name: "", kind: "small_group", member_ids: "", circle_id: "" });
+  const [busy, setBusy] = useState(false);
+  const submit = async (event: FormEvent<HTMLFormElement>, endpoint: string, body: Record<string, unknown>, success: string) => {
+    event.preventDefault(); setBusy(true);
+    try {
+      const id = commandId(); await send({ id, endpoint, body: { command_id: id, ...body } });
+      onNotice(success); onAccountsChanged();
+    } catch (error) { onNotice(error instanceof Error ? error.message : "Setup action could not be completed."); }
+    finally { setBusy(false); }
+  };
+  const memberIds = (value: string) => split(value);
+  return <section className="administrator-setup">
+    <p className="eyebrow">Development-only administrator setup</p><h1>Configure a Crucible.</h1><p className="lead">Create the cycle first, then enroll people and define the explicit relationships and groups that operate it. Setup actions require an online API connection.</p>
+    <label>Active Crucible ID<input value={crucibleId} onChange={(event) => setCrucibleId(event.target.value)} /></label>
+    <div className="setup-grid">
+      <form onSubmit={(event) => void submit(event, "/api/crucibles", { crucible_id: crucibleId, ...crucible }, "Crucible created. Enroll its members next.")}><h2>1. Create Crucible</h2><label>Name<input required value={crucible.name} onChange={(event) => setCrucible({ ...crucible, name: event.target.value })} /></label><label>Review week start<input required type="date" value={crucible.review_week_start} onChange={(event) => setCrucible({ ...crucible, review_week_start: event.target.value })} /></label><label>Refinement week start<input required type="date" value={crucible.refinement_week_start} onChange={(event) => setCrucible({ ...crucible, refinement_week_start: event.target.value })} /></label><label>Launch date<input required type="date" value={crucible.launch_date} onChange={(event) => setCrucible({ ...crucible, launch_date: event.target.value })} /></label><button className="primary" disabled={busy}>Create Crucible</button></form>
+      <form onSubmit={(event) => void submit(event, `/api/crucibles/${crucibleId}/members`, member, "Member enrolled in the active Crucible.")}><h2>2. Enroll Member</h2><label>Member ID<input required minLength={3} value={member.member_id} onChange={(event) => setMember({ ...member, member_id: event.target.value })} placeholder="participant-marcus" /></label><label>Name<input required minLength={2} value={member.name} onChange={(event) => setMember({ ...member, name: event.target.value })} /></label><label>Role<select value={member.role} onChange={(event) => setMember({ ...member, role: event.target.value })}>{["participant", "coach", "captain", "administrator"].map((role) => <option key={role} value={role}>{role}</option>)}</select></label><button className="primary" disabled={busy}>Enroll Member</button></form>
+      <form onSubmit={(event) => void submit(event, `/api/crucibles/${crucibleId}/${relationship.kind}-assignments`, { member_id: relationship.member_id, mentor_id: relationship.mentor_id }, "Assignment created.")}><h2>3. Create Assignment</h2><label>Assignment<select value={relationship.kind} onChange={(event) => setRelationship({ ...relationship, kind: event.target.value })}><option value="coach">Participant to Coach</option><option value="captain">Coach to Captain</option></select></label><label>{relationship.kind === "coach" ? "Participant ID" : "Coach ID"}<input required minLength={3} value={relationship.member_id} onChange={(event) => setRelationship({ ...relationship, member_id: event.target.value })} /></label><label>{relationship.kind === "coach" ? "Coach ID" : "Captain ID"}<input required minLength={3} value={relationship.mentor_id} onChange={(event) => setRelationship({ ...relationship, mentor_id: event.target.value })} /></label><button className="primary" disabled={busy}>Create Assignment</button></form>
+      <form onSubmit={(event) => void submit(event, `/api/crucibles/${crucibleId}/circles`, { ...circle, member_ids: memberIds(circle.member_ids), coach_sponsor_id: circle.coach_sponsor_id || null }, "Circle created. Create its matching channel below.")}><h2>4. Create Circle</h2><label>Circle ID<input required minLength={3} value={circle.circle_id} onChange={(event) => setCircle({ ...circle, circle_id: event.target.value })} /></label><label>Name<input required minLength={2} value={circle.name} onChange={(event) => setCircle({ ...circle, name: event.target.value })} /></label><label>Type<select value={circle.kind} onChange={(event) => setCircle({ ...circle, kind: event.target.value })}><option value="small_group">Small group</option><option value="buddy">Buddy pair</option><option value="triad">Triad</option></select></label><label>Member IDs, comma separated<input required value={circle.member_ids} onChange={(event) => setCircle({ ...circle, member_ids: event.target.value })} /></label><label>Coach sponsor ID (optional)<input value={circle.coach_sponsor_id} onChange={(event) => setCircle({ ...circle, coach_sponsor_id: event.target.value })} /></label><button className="primary" disabled={busy}>Create Circle</button></form>
+      <form onSubmit={(event) => void submit(event, `/api/crucibles/${crucibleId}/channels`, { ...channel, member_ids: memberIds(channel.member_ids), circle_id: channel.circle_id || null }, "Channel created.")}><h2>5. Create Channel</h2><label>Channel ID<input required minLength={3} value={channel.channel_id} onChange={(event) => setChannel({ ...channel, channel_id: event.target.value })} /></label><label>Name<input required minLength={2} value={channel.name} onChange={(event) => setChannel({ ...channel, name: event.target.value })} /></label><label>Type<select value={channel.kind} onChange={(event) => setChannel({ ...channel, kind: event.target.value })}>{["whole_crucible", "small_group", "buddy", "triad", "coach_direct", "captain_direct", "leadership", "participant_private"].map((kind) => <option key={kind} value={kind}>{kind.replaceAll("_", " ")}</option>)}</select></label><label>Member IDs, comma separated<input required value={channel.member_ids} onChange={(event) => setChannel({ ...channel, member_ids: event.target.value })} /></label><label>Circle ID (required for a circle channel)<input value={channel.circle_id} onChange={(event) => setChannel({ ...channel, circle_id: event.target.value })} /></label><button className="primary" disabled={busy}>Create Channel</button></form>
+    </div>
+  </section>;
+}
+
 function App() {
-  const [screen, setScreen] = useState<"anvil" | "plan" | "calibration" | "coach-review">("anvil");
+  const [screen, setScreen] = useState<"anvil" | "plan" | "calibration" | "coach-review" | "administrator-setup">("anvil");
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [coachRecords, setCoachRecords] = useState<Dashboard[]>([]);
   const [captainRecords, setCaptainRecords] = useState<CaptainCoachStatus[]>([]);
@@ -251,6 +281,7 @@ function App() {
   const planValues = split(plan.values);
   const isParticipant = dashboard?.role === "participant";
   const switchAccount = (memberId: string) => { localStorage.setItem("threef-development-account", memberId); setActiveMemberId(memberId); setReviewParticipant(null); setScreen("anvil"); setNotice(""); };
+  const refreshAccounts = () => { if (DEVELOPMENT_MODE) fetch(`${API}/api/development/accounts`).then((response) => response.ok ? response.json() : []).then(setAccounts).catch(() => undefined); };
   const planSteps: DeckStep[] = [
     { section: "The season", prompt: "What will you call this 12-week season?", hint: "Choose a name for the kind of man you are becoming.", content: <label>Season name<Field value={plan.season_name} onChange={(value) => updatePlan("season_name", value)} /></label> },
     { section: "Your stewardship", prompt: "Which roles are you carrying this season?", hint: "Choose the roles that need your deliberate attention. Select all that apply.", content: <ChipPicker options={ROLE_OPTIONS} selected={split(plan.roles)} onChange={(selected) => updatePlan("roles", selected.join(", "))} /> },
@@ -275,7 +306,7 @@ function App() {
   return <main>
     <header><div className="brand"><span className="mark">3F</span><div><strong>Clean Burn</strong><small>Read. Tell the truth. Strike.</small></div></div><div className={`connection ${online ? "online" : "offline"}`}>{online ? "Online" : "Offline"}</div></header>
     {DEVELOPMENT_MODE && accounts.length > 0 && <label className="account-switcher"><span>Development account</span><select value={activeMemberId} onChange={(event) => switchAccount(event.target.value)}>{accounts.map((account) => <option value={account.member_id} key={account.member_id}>{account.name} · {account.role}</option>)}</select></label>}
-    <nav><button className={screen === "anvil" ? "active" : ""} onClick={() => setScreen("anvil")}>Anvil</button>{isParticipant && <button className={screen === "plan" ? "active" : ""} onClick={() => setScreen("plan")}>Season Plan</button>}{isParticipant && <button className={screen === "calibration" ? "active" : ""} onClick={() => setScreen("calibration")}>Weekly Calibration</button>}{dashboard?.role === "coach" && <button className={screen === "coach-review" ? "active" : ""} onClick={() => setScreen("coach-review")}>Coach review</button>}</nav>
+    <nav><button className={screen === "anvil" ? "active" : ""} onClick={() => setScreen("anvil")}>Anvil</button>{isParticipant && <button className={screen === "plan" ? "active" : ""} onClick={() => setScreen("plan")}>Season Plan</button>}{isParticipant && <button className={screen === "calibration" ? "active" : ""} onClick={() => setScreen("calibration")}>Weekly Calibration</button>}{dashboard?.role === "coach" && <button className={screen === "coach-review" ? "active" : ""} onClick={() => setScreen("coach-review")}>Coach review</button>}{DEVELOPMENT_MODE && dashboard?.role === "administrator" && <button className={screen === "administrator-setup" ? "active" : ""} onClick={() => setScreen("administrator-setup")}>Setup</button>}</nav>
     {notice && <aside className="notice">{notice}</aside>}
     {screen === "anvil" && isParticipant && dashboard?.latest_review && <ParticipantReview review={dashboard.latest_review} />}
     {screen === "anvil" && dashboard?.role === "captain" && <CaptainVisibility records={captainRecords} />}
@@ -283,6 +314,7 @@ function App() {
     {screen === "plan" && <Deck eyebrow="Season Plan" steps={planSteps} submitLabel="Submit season plan" onSubmit={submitPlan} />}
     {screen === "calibration" && <Deck eyebrow={`Week ${dashboard?.current_week ?? 1} · Weekly Calibration`} steps={calibrationSteps} submitLabel="Submit calibration" onSubmit={submitCalibration} />}
     {screen === "coach-review" && <CoachReview participant={reviewParticipant} participants={coachRecords} feedback={feedback} requestRevision={requestRevision} onFeedbackChange={setFeedback} onRequestRevisionChange={setRequestRevision} onOpen={(participantId) => void openCoachReview(participantId)} onSubmit={submitCoachReview} />}
+    {DEVELOPMENT_MODE && screen === "administrator-setup" && dashboard?.role === "administrator" && <AdministratorSetup onNotice={setNotice} onAccountsChanged={refreshAccounts} />}
   </main>;
 }
 

@@ -338,6 +338,7 @@ class ApplicationService:
             "crucible_id": "demo-crucible", "name": "The Stewardship Season", "review_week_start": "2026-06-23", "refinement_week_start": "2026-06-30", "launch_date": "2026-07-07"
         })
         for member_id, name, role in [
+            ("admin-amos", "Administrator Amos", ProgramRole.ADMINISTRATOR),
             ("captain-silas", "Captain Silas", ProgramRole.CAPTAIN),
             ("coach-elias", "Coach Elias", ProgramRole.COACH),
             ("demo-member", "Marcus", ProgramRole.PARTICIPANT),
