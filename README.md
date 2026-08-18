@@ -30,6 +30,30 @@ uv run uvicorn threef.app:app --app-dir src --reload
 
 The local API seeds a participant named Marcus at `demo-member`. Build the browser bundle outside Docker with `cd web && npm run build`.
 
+### Autonomous Delivery Loop
+
+`TODO.md` is the prioritized execution backlog. The Ralph loop runs OpenCode against one highest-priority TODO item per iteration, requires verification and a Conventional Commit, and stops on completion, a documented blocker, or an iteration limit.
+
+```bash
+cd ~/3f-app
+./ralph-loop.sh
+```
+
+Useful controls:
+
+```bash
+# Run at most three iterations.
+RALPH_MAX_ITERATIONS=3 ./ralph-loop.sh
+
+# Select a specific OpenCode model or agent.
+RALPH_MODEL="provider/model" RALPH_AGENT="agent-name" ./ralph-loop.sh
+
+# Permit unattended OpenCode tool approvals. Review the prompt and worktree first.
+RALPH_AUTO_APPROVE=1 ./ralph-loop.sh
+```
+
+Iteration logs are written to `ralph/runs/` and ignored by Git. Read `ralph/PROMPT.md` before changing the loop contract.
+
 ### Development Account Switcher
 
 The Compose development environment sets `THREEF_DEVELOPMENT_MODE=true`. The PWA then displays a local-only account switcher for the seeded Participant, Coach, and Captain accounts. It is intended solely for reviewing role-specific UI while authentication is not yet implemented.

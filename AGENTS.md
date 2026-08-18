@@ -1,5 +1,11 @@
 # Agent Guidance
 
+## Work Order
+
+Read `TODO.md` before starting implementation work. Complete the highest-priority unblocked item and update its checkbox only after its required verification passes.
+
+For autonomous iteration, follow `ralph/PROMPT.md`. Do not begin a new TODO item until the current item is implemented, verified, documented when needed, and committed.
+
 ## Commits
 
 Always create a Git commit after completing a cohesive change set, unless the user explicitly asks not to commit.
