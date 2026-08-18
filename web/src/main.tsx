@@ -6,10 +6,16 @@ const API = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 const DEVELOPMENT_MODE = import.meta.env.DEV;
 
 type Strike = { action: string; measure: string };
+type RoleRead = { role: string; level: string; evidence: string };
+type Calibration = {
+  week: number; aim: string; momentum_level: string; momentum_evidence: string; meaningful_moment: string; why_it_mattered: string;
+  value_in_focus: string; value_most_neglected: string; role_reads: RoleRead[]; avoided: string; drain: string; unreleased_weight: string;
+  role_to_forge: string; strikes: Strike[];
+};
 type Dashboard = {
   member_id: string; name: string; role: "participant" | "coach" | "captain" | "administrator" | null; coach_name: string; current_week: number; calibration_count: number;
   season_plan: { season_name: string } | null;
-  latest_calibration: { aim: string; momentum_level: string; role_to_forge: string; strikes: Strike[] } | null;
+  latest_calibration: Calibration | null;
   latest_review: { feedback: string } | null;
   direct_reports: DevelopmentAccount[];
 };
@@ -119,8 +125,29 @@ function Deck({ eyebrow, steps, submitLabel, onSubmit }: { eyebrow: string; step
   </section>;
 }
 
+function CoachReview({ participant, participants, feedback, requestRevision, onFeedbackChange, onRequestRevisionChange, onOpen, onSubmit }: {
+  participant: Dashboard | null; participants: Dashboard[]; feedback: string; requestRevision: boolean; onFeedbackChange: (value: string) => void;
+  onRequestRevisionChange: (value: boolean) => void; onOpen: (participantId: string) => void; onSubmit: () => void;
+}) {
+  const calibration = participant?.latest_calibration;
+  if (!participant || !calibration) return <section className="review-empty"><p className="eyebrow">Coach review</p><h1>Choose a submitted calibration.</h1><p className="lead">Open an assigned participant to see his complete 3F read.</p><div className="review-queue">{participants.filter((record) => record.latest_calibration).map((record) => <button type="button" key={record.member_id} onClick={() => onOpen(record.member_id)}><span>{record.name}</span><b>Week {record.latest_calibration?.week} submitted</b></button>)}{participants.length > 0 && !participants.some((record) => record.latest_calibration) && <p>No assigned participant has submitted a calibration yet.</p>}{participants.length === 0 && <p>Loading assigned participant records...</p>}</div></section>;
+  return <section className="coach-review">
+    <p className="eyebrow">Coach review · Week {calibration.week}</p><h1>{participant.name}'s submitted 3F read</h1>
+    <p className="lead">Read the evidence in context. Your response is visible to {participant.name}.</p>
+    <div className="review-sections">
+      <article><p className="eyebrow">1. Aim · Furnace Stack</p><h2>{calibration.aim}</h2><p>Furnace read: <b>{calibration.momentum_level.replace("_", " ")}</b></p><p>{calibration.momentum_evidence}</p></article>
+      <article><p className="eyebrow">2. Meaning · Hearth</p><h2>{calibration.meaningful_moment}</h2><p>{calibration.why_it_mattered}</p></article>
+      <article><p className="eyebrow">3. Values · Refractory Lining</p><dl><div><dt>In focus</dt><dd>{calibration.value_in_focus}</dd></div><div><dt>Most neglected</dt><dd>{calibration.value_most_neglected}</dd></div></dl></article>
+      <article><p className="eyebrow">4. Responsibility · Anvil</p>{calibration.role_reads.map((roleRead) => <div className="role-read" key={roleRead.role}><h2>{roleRead.role} <small>{roleRead.level}</small></h2><p>{roleRead.evidence}</p></div>)}</article>
+      <article><p className="eyebrow">5. Friction · Slag Channel</p><dl className="stacked-definition"><div><dt>Avoided</dt><dd>{calibration.avoided}</dd></div><div><dt>Drain</dt><dd>{calibration.drain}</dd></div><div><dt>Unreleased weight</dt><dd>{calibration.unreleased_weight}</dd></div></dl></article>
+      <article><p className="eyebrow">6. Cultivation · Hammer</p><h2>Forge: {calibration.role_to_forge}</h2><ol>{calibration.strikes.map((strike) => <li key={strike.action}><b>{strike.action}</b><span>{strike.measure}</span></li>)}</ol></article>
+    </div>
+    <section className="review-response"><p className="eyebrow">Participant-visible response</p><label>Feedback<textarea value={feedback} onChange={(event) => onFeedbackChange(event.target.value)} placeholder="Offer a concise, concrete response." /></label><label className="revision-toggle"><input type="checkbox" checked={requestRevision} onChange={(event) => onRequestRevisionChange(event.target.checked)} /> Request a revision</label><button className="primary" onClick={onSubmit} disabled={feedback.trim().length < 5}>{requestRevision ? "Request revision" : "Submit feedback"}</button></section>
+  </section>;
+}
+
 function App() {
-  const [screen, setScreen] = useState<"anvil" | "plan" | "calibration">("anvil");
+  const [screen, setScreen] = useState<"anvil" | "plan" | "calibration" | "coach-review">("anvil");
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [coachRecords, setCoachRecords] = useState<Dashboard[]>([]);
   const [accounts, setAccounts] = useState<DevelopmentAccount[]>([]);
@@ -131,6 +158,9 @@ function App() {
   const [read, setRead] = useState(() => ({ ...defaultRead, ...JSON.parse(localStorage.getItem("threef-read-draft") ?? "{}") }));
   const [notice, setNotice] = useState("");
   const [online, setOnline] = useState(navigator.onLine);
+  const [reviewParticipant, setReviewParticipant] = useState<Dashboard | null>(null);
+  const [feedback, setFeedback] = useState("");
+  const [requestRevision, setRequestRevision] = useState(false);
 
   const refresh = () => fetch(`${API}/api/dashboard/${activeMemberId}`).then((response) => response.json()).then(setDashboard).catch(() => setNotice("Working offline. Your drafts are safe on this device."));
   useEffect(() => {
@@ -171,11 +201,29 @@ function App() {
     const body = { command_id: commandId(), member_id: activeMemberId, week: dashboard?.current_week ?? 1, aim: read.aim, momentum_level: read.momentum_level, momentum_evidence: read.momentum_evidence, meaningful_moment: read.meaningful_moment, why_it_mattered: read.why_it_mattered, value_in_focus: read.value_in_focus, value_most_neglected: read.value_most_neglected, role_reads: [{ role: read.role, level: read.responsibility_level, evidence: read.responsibility_evidence }], avoided: read.avoided, drain: read.drain, unreleased_weight: read.unreleased_weight, role_to_forge: read.role_to_forge, strikes, scoreboard: { [plan.domain]: "green" } };
     void deliver({ id: body.command_id, endpoint: "/api/calibrations", body }, "Your calibration is recorded. Protect the next strike.", "anvil");
   };
+  const openCoachReview = async (participantId: string) => {
+    try {
+      const response = await fetch(`${API}/api/coaches/${activeMemberId}/participants/${participantId}`);
+      if (!response.ok) throw new Error("Unable to load this participant record.");
+      const record = await response.json() as { participant: Dashboard };
+      setReviewParticipant(record.participant); setFeedback(""); setRequestRevision(false); setScreen("coach-review");
+    } catch { setNotice("This participant record is unavailable. Reconnect and try again."); }
+  };
+  const submitCoachReview = async () => {
+    const calibration = reviewParticipant?.latest_calibration;
+    if (!reviewParticipant || !calibration) return;
+    try {
+      const command_id = commandId();
+      await send({ id: command_id, endpoint: `/api/calibrations/${reviewParticipant.member_id}/${calibration.week}/review`, body: { command_id, coach_id: activeMemberId, feedback, request_revision: requestRevision } });
+      setNotice(requestRevision ? "Revision request sent to the participant." : "Feedback sent to the participant.");
+      refresh(); setScreen("anvil");
+    } catch { setNotice("The review was not sent. Reconnect and try again."); }
+  };
 
   const planRoles = split(plan.roles);
   const planValues = split(plan.values);
   const isParticipant = dashboard?.role === "participant";
-  const switchAccount = (memberId: string) => { localStorage.setItem("threef-development-account", memberId); setActiveMemberId(memberId); setScreen("anvil"); setNotice(""); };
+  const switchAccount = (memberId: string) => { localStorage.setItem("threef-development-account", memberId); setActiveMemberId(memberId); setReviewParticipant(null); setScreen("anvil"); setNotice(""); };
   const planSteps: DeckStep[] = [
     { section: "The season", prompt: "What will you call this 12-week season?", hint: "Choose a name for the kind of man you are becoming.", content: <label>Season name<Field value={plan.season_name} onChange={(value) => updatePlan("season_name", value)} /></label> },
     { section: "Your stewardship", prompt: "Which roles are you carrying this season?", hint: "Choose the roles that need your deliberate attention. Select all that apply.", content: <ChipPicker options={ROLE_OPTIONS} selected={split(plan.roles)} onChange={(selected) => updatePlan("roles", selected.join(", "))} /> },
@@ -200,11 +248,12 @@ function App() {
   return <main>
     <header><div className="brand"><span className="mark">3F</span><div><strong>Clean Burn</strong><small>Read. Tell the truth. Strike.</small></div></div><div className={`connection ${online ? "online" : "offline"}`}>{online ? "Online" : "Offline"}</div></header>
     {DEVELOPMENT_MODE && accounts.length > 0 && <label className="account-switcher"><span>Development account</span><select value={activeMemberId} onChange={(event) => switchAccount(event.target.value)}>{accounts.map((account) => <option value={account.member_id} key={account.member_id}>{account.name} · {account.role}</option>)}</select></label>}
-    <nav><button className={screen === "anvil" ? "active" : ""} onClick={() => setScreen("anvil")}>Anvil</button>{isParticipant && <button className={screen === "plan" ? "active" : ""} onClick={() => setScreen("plan")}>Season Plan</button>}{isParticipant && <button className={screen === "calibration" ? "active" : ""} onClick={() => setScreen("calibration")}>Weekly Calibration</button>}</nav>
+    <nav><button className={screen === "anvil" ? "active" : ""} onClick={() => setScreen("anvil")}>Anvil</button>{isParticipant && <button className={screen === "plan" ? "active" : ""} onClick={() => setScreen("plan")}>Season Plan</button>}{isParticipant && <button className={screen === "calibration" ? "active" : ""} onClick={() => setScreen("calibration")}>Weekly Calibration</button>}{dashboard?.role === "coach" && <button className={screen === "coach-review" ? "active" : ""} onClick={() => setScreen("coach-review")}>Coach review</button>}</nav>
     {notice && <aside className="notice">{notice}</aside>}
     {screen === "anvil" && <section className="home"><p className="eyebrow">{dashboard?.role ?? "Account"} · {dashboard?.season_plan?.season_name ?? "The Stewardship Season"}</p><h1>{dashboard ? `The Anvil, ${dashboard.name}.` : "The Anvil."}</h1><p className="lead">{isParticipant ? "A clear read on what you are feeding, holding, and releasing." : "A development view of the people and responsibilities entrusted to you."}</p>{isParticipant ? <><div className="cards"><article><span>Current week</span><strong>{dashboard?.current_week ?? 1} / 12</strong><p>{dashboard?.calibration_count ?? 0} calibrations recorded</p></article><article><span>Coach</span><strong>{dashboard?.coach_name ?? "Loading..."}</strong><p>{dashboard?.latest_review ? "Latest feedback is ready" : "Your witness in the work"}</p></article><article><span>Next strike</span><strong>{dashboard?.latest_calibration?.strikes?.[0]?.action ?? "Build your Season Plan"}</strong><p>{dashboard?.latest_calibration?.role_to_forge ? `Forge: ${dashboard.latest_calibration.role_to_forge}` : "Start with stewardship"}</p></article></div>{dashboard?.latest_calibration && <article className="read-summary"><p className="eyebrow">Last calibration</p><h2>{dashboard.latest_calibration.aim}</h2><p>Furnace read: <b>{dashboard.latest_calibration.momentum_level.replace("_", " ")}</b></p>{dashboard.latest_review && <blockquote>{dashboard.latest_review.feedback}</blockquote>}</article>}<button className="primary" onClick={() => setScreen(dashboard?.season_plan ? "calibration" : "plan")}>{dashboard?.season_plan ? "Begin weekly calibration" : "Build the season plan"}</button></> : <><div className="cards"><article><span>Role</span><strong>{dashboard?.role}</strong><p>Development account view</p></article><article><span>Direct reports</span><strong>{dashboard?.direct_reports.length ?? 0}</strong><p>{dashboard?.role === "coach" ? "Participants assigned to you" : "Coaches assigned to you"}</p></article></div>{dashboard?.role === "coach" ? <section className="record-list"><p className="eyebrow">Student records</p>{coachRecords.length ? coachRecords.map((record) => <article key={record.member_id}><div><strong>{record.name}</strong><span>{record.season_plan?.season_name ?? "Season Plan not submitted"}</span></div><dl><div><dt>Calibrations</dt><dd>{record.calibration_count}</dd></div><div><dt>Current week</dt><dd>{record.current_week} / 12</dd></div></dl>{record.latest_calibration ? <p><b>Latest aim:</b> {record.latest_calibration.aim}</p> : <p>No weekly calibration submitted yet.</p>}</article>) : <p className="lead">Loading assigned student records...</p>}</section> : <section className="report-list"><p className="eyebrow">Your people</p>{dashboard?.direct_reports.length ? dashboard.direct_reports.map((report) => <article key={report.member_id}><strong>{report.name}</strong><span>{report.role}</span></article>) : <p className="lead">No direct reports are assigned yet.</p>}</section>}</>}</section>}
     {screen === "plan" && <Deck eyebrow="Season Plan" steps={planSteps} submitLabel="Submit season plan" onSubmit={submitPlan} />}
     {screen === "calibration" && <Deck eyebrow={`Week ${dashboard?.current_week ?? 1} · Weekly Calibration`} steps={calibrationSteps} submitLabel="Submit calibration" onSubmit={submitCalibration} />}
+    {screen === "coach-review" && <CoachReview participant={reviewParticipant} participants={coachRecords} feedback={feedback} requestRevision={requestRevision} onFeedbackChange={setFeedback} onRequestRevisionChange={setRequestRevision} onOpen={(participantId) => void openCoachReview(participantId)} onSubmit={submitCoachReview} />}
   </main>;
 }
 

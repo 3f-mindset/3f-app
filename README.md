@@ -433,8 +433,12 @@ The local event-sourced API now supports the foundation of this milestone:
 - `POST /api/crucibles/{crucible_id}/coach-assignments` and `/captain-assignments` for reporting relationships.
 - `POST /api/crucibles/{crucible_id}/circles` for small groups, buddy pairs, and triads, including an optional Coach sponsor.
 - `POST /api/crucibles/{crucible_id}/channels` for explicit channel membership.
+- `POST /api/season-plans`, `POST /api/calibrations`, and `POST /api/calibrations/{member_id}/{week}/review` for the participant submission and Coach review loop.
+- `GET /api/coaches/{coach_id}/participants/{participant_id}` for an assigned Coach's full submitted calibration record; unassigned relationships are rejected.
 
 The POC validates that buddy pairs have two members, triads have three, Coach sponsors are Coaches in the same Crucible, circle channels match their circle membership, and participant-private channels exclude Coaches and Captains.
+
+In the PWA, a Coach selects **Coach review** in the Anvil, opens an assigned participant's submitted calibration, sees each of the six 3F sections, then sends participant-visible feedback or requests a revision. The review is stored as a `WeeklyCalibrationReviewed` event.
 
 ### Milestone 2: Season Design Journey
 

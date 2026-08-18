@@ -78,6 +78,13 @@ def test_only_assigned_coach_can_review_calibration() -> None:
     assert client.post("/api/season-plans", json=plan_payload()).status_code == 201
     assert client.post("/api/calibrations", json=calibration_payload()).status_code == 201
 
+    assigned_record = client.get("/api/coaches/coach-elias/participants/demo-member")
+    assert assigned_record.status_code == 200
+    calibration = assigned_record.json()["participant"]["latest_calibration"]
+    assert calibration["aim"] == "Build a life ordered around faithful stewardship."
+    assert calibration["unreleased_weight"] == "I am carrying frustration from an unfinished conversation."
+    assert calibration["strikes"] == [{"action": "Complete the budget review", "measure": "30 focused minutes on Saturday"}]
+
     unassigned = client.post("/api/calibrations/demo-member/1/review", json={
         "command_id": "captain-review", "coach_id": "captain-silas", "feedback": "This must not be accepted.",
     })
@@ -85,10 +92,13 @@ def test_only_assigned_coach_can_review_calibration() -> None:
     assert client.get("/api/dashboard/demo-member").json()["latest_review"] is None
 
     assigned = client.post("/api/calibrations/demo-member/1/review", json={
-        "command_id": "assigned-review", "coach_id": "coach-elias", "feedback": "Keep protecting the conversation you cleared.",
+        "command_id": "assigned-review", "coach_id": "coach-elias", "feedback": "Clarify the first strike before next week.", "request_revision": True,
     })
     assert assigned.status_code == 201
-    assert client.get("/api/dashboard/demo-member").json()["latest_review"]["coach_id"] == "coach-elias"
+    assert assigned.json()["status"] == "revision_requested"
+    latest_review = client.get("/api/dashboard/demo-member").json()["latest_review"]
+    assert latest_review["coach_id"] == "coach-elias"
+    assert latest_review["request_revision"] is True
 
 
 def test_development_account_switcher_projection() -> None:
