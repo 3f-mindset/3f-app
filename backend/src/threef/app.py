@@ -485,6 +485,13 @@ class ApplicationService:
             for member in self.read_model.members.values() if member.role is not None
         ]
 
+    def coach_participant_record(self, coach_id: str, participant_id: str) -> dict[str, Any]:
+        coach = self.member_or_404(coach_id)
+        participant = self.member_or_404(participant_id)
+        if coach.role != ProgramRole.COACH or participant.coach_id != coach_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Coach is not assigned to this participant.")
+        return {"participant": self.dashboard(participant_id)}
+
     def member_or_404(self, member_id: str) -> MemberProjection:
         if member_id not in self.read_model.members:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found.")
@@ -540,6 +547,10 @@ def create_app(development_mode: bool | None = None) -> FastAPI:
         if not app.state.development_mode:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found.")
         return service.development_accounts()
+
+    @app.get("/api/coaches/{coach_id}/participants/{participant_id}")
+    def coach_participant_record(coach_id: str, participant_id: str) -> dict[str, Any]:
+        return service.coach_participant_record(coach_id, participant_id)
 
     @app.post("/api/crucibles", status_code=status.HTTP_201_CREATED)
     def create_crucible(command: CreateCrucibleCommand) -> dict[str, Any]:

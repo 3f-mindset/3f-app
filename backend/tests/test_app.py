@@ -82,6 +82,10 @@ def test_development_account_switcher_projection() -> None:
     coach_dashboard = client.get("/api/dashboard/coach-elias").json()
     assert coach_dashboard["role"] == "coach"
     assert coach_dashboard["direct_reports"] == [{"member_id": "demo-member", "name": "Marcus", "role": "participant"}]
+    participant_record = client.get("/api/coaches/coach-elias/participants/demo-member")
+    assert participant_record.status_code == 200
+    assert participant_record.json()["participant"]["name"] == "Marcus"
+    assert client.get("/api/coaches/coach-elias/participants/captain-silas").status_code == 403
     production_client = TestClient(create_app(development_mode=False))
     assert production_client.get("/api/development/accounts").status_code == 404
 
