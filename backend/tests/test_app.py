@@ -98,6 +98,7 @@ def test_only_assigned_coach_can_review_calibration() -> None:
     assert assigned.json()["status"] == "revision_requested"
     latest_review = client.get("/api/dashboard/demo-member").json()["latest_review"]
     assert latest_review["coach_id"] == "coach-elias"
+    assert latest_review["feedback"] == "Clarify the first strike before next week."
     assert latest_review["request_revision"] is True
 
 

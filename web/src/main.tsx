@@ -16,7 +16,7 @@ type Dashboard = {
   member_id: string; name: string; role: "participant" | "coach" | "captain" | "administrator" | null; coach_name: string; current_week: number; calibration_count: number;
   season_plan: { season_name: string } | null;
   latest_calibration: Calibration | null;
-  latest_review: { feedback: string } | null;
+  latest_review: { feedback: string; request_revision: boolean } | null;
   direct_reports: DevelopmentAccount[];
 };
 type DevelopmentAccount = { member_id: string; name: string; role: "participant" | "coach" | "captain" | "administrator" };
@@ -146,6 +146,16 @@ function CoachReview({ participant, participants, feedback, requestRevision, onF
   </section>;
 }
 
+function ParticipantReview({ review }: { review: NonNullable<Dashboard["latest_review"]> }) {
+  const revisionRequested = review.request_revision;
+  return <article className={`coach-feedback ${revisionRequested ? "revision-requested" : ""}`}>
+    <p className="eyebrow">Coach feedback</p>
+    <h2>{revisionRequested ? "Your Coach requested a revision" : "Your Coach has reviewed this calibration"}</h2>
+    <blockquote>{review.feedback}</blockquote>
+    <p className="next-action"><b>Next action:</b> {revisionRequested ? "Review this feedback and prepare your revision. Your Coach must reopen this submitted week before you can submit it again." : "Carry this feedback into your next weekly calibration."}</p>
+  </article>;
+}
+
 function App() {
   const [screen, setScreen] = useState<"anvil" | "plan" | "calibration" | "coach-review">("anvil");
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
@@ -250,6 +260,7 @@ function App() {
     {DEVELOPMENT_MODE && accounts.length > 0 && <label className="account-switcher"><span>Development account</span><select value={activeMemberId} onChange={(event) => switchAccount(event.target.value)}>{accounts.map((account) => <option value={account.member_id} key={account.member_id}>{account.name} · {account.role}</option>)}</select></label>}
     <nav><button className={screen === "anvil" ? "active" : ""} onClick={() => setScreen("anvil")}>Anvil</button>{isParticipant && <button className={screen === "plan" ? "active" : ""} onClick={() => setScreen("plan")}>Season Plan</button>}{isParticipant && <button className={screen === "calibration" ? "active" : ""} onClick={() => setScreen("calibration")}>Weekly Calibration</button>}{dashboard?.role === "coach" && <button className={screen === "coach-review" ? "active" : ""} onClick={() => setScreen("coach-review")}>Coach review</button>}</nav>
     {notice && <aside className="notice">{notice}</aside>}
+    {screen === "anvil" && isParticipant && dashboard?.latest_review && <ParticipantReview review={dashboard.latest_review} />}
     {screen === "anvil" && <section className="home"><p className="eyebrow">{dashboard?.role ?? "Account"} · {dashboard?.season_plan?.season_name ?? "The Stewardship Season"}</p><h1>{dashboard ? `The Anvil, ${dashboard.name}.` : "The Anvil."}</h1><p className="lead">{isParticipant ? "A clear read on what you are feeding, holding, and releasing." : "A development view of the people and responsibilities entrusted to you."}</p>{isParticipant ? <><div className="cards"><article><span>Current week</span><strong>{dashboard?.current_week ?? 1} / 12</strong><p>{dashboard?.calibration_count ?? 0} calibrations recorded</p></article><article><span>Coach</span><strong>{dashboard?.coach_name ?? "Loading..."}</strong><p>{dashboard?.latest_review ? "Latest feedback is ready" : "Your witness in the work"}</p></article><article><span>Next strike</span><strong>{dashboard?.latest_calibration?.strikes?.[0]?.action ?? "Build your Season Plan"}</strong><p>{dashboard?.latest_calibration?.role_to_forge ? `Forge: ${dashboard.latest_calibration.role_to_forge}` : "Start with stewardship"}</p></article></div>{dashboard?.latest_calibration && <article className="read-summary"><p className="eyebrow">Last calibration</p><h2>{dashboard.latest_calibration.aim}</h2><p>Furnace read: <b>{dashboard.latest_calibration.momentum_level.replace("_", " ")}</b></p>{dashboard.latest_review && <blockquote>{dashboard.latest_review.feedback}</blockquote>}</article>}<button className="primary" onClick={() => setScreen(dashboard?.season_plan ? "calibration" : "plan")}>{dashboard?.season_plan ? "Begin weekly calibration" : "Build the season plan"}</button></> : <><div className="cards"><article><span>Role</span><strong>{dashboard?.role}</strong><p>Development account view</p></article><article><span>Direct reports</span><strong>{dashboard?.direct_reports.length ?? 0}</strong><p>{dashboard?.role === "coach" ? "Participants assigned to you" : "Coaches assigned to you"}</p></article></div>{dashboard?.role === "coach" ? <section className="record-list"><p className="eyebrow">Student records</p>{coachRecords.length ? coachRecords.map((record) => <article key={record.member_id}><div><strong>{record.name}</strong><span>{record.season_plan?.season_name ?? "Season Plan not submitted"}</span></div><dl><div><dt>Calibrations</dt><dd>{record.calibration_count}</dd></div><div><dt>Current week</dt><dd>{record.current_week} / 12</dd></div></dl>{record.latest_calibration ? <p><b>Latest aim:</b> {record.latest_calibration.aim}</p> : <p>No weekly calibration submitted yet.</p>}</article>) : <p className="lead">Loading assigned student records...</p>}</section> : <section className="report-list"><p className="eyebrow">Your people</p>{dashboard?.direct_reports.length ? dashboard.direct_reports.map((report) => <article key={report.member_id}><strong>{report.name}</strong><span>{report.role}</span></article>) : <p className="lead">No direct reports are assigned yet.</p>}</section>}</>}</section>}
     {screen === "plan" && <Deck eyebrow="Season Plan" steps={planSteps} submitLabel="Submit season plan" onSubmit={submitPlan} />}
     {screen === "calibration" && <Deck eyebrow={`Week ${dashboard?.current_week ?? 1} · Weekly Calibration`} steps={calibrationSteps} submitLabel="Submit calibration" onSubmit={submitCalibration} />}

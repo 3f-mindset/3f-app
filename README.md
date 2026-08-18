@@ -60,6 +60,10 @@ The Compose development environment sets `THREEF_DEVELOPMENT_MODE=true`. The PWA
 
 Set `THREEF_DEVELOPMENT_MODE=false` outside development. This disables the `/api/development/accounts` endpoint and removes the switcher from a production browser build.
 
+### Participant Review Feedback
+
+The participant Anvil shows the latest feedback from the assigned Coach. A revision request is presented separately with its next action: review the feedback and prepare the revision. The submitted week remains immutable until the assigned Coach reopens it; reopening is a separate workflow so submission history is preserved.
+
 ## The Why
 
 Most men do not lack effort. They lack a way to measure themselves honestly.
