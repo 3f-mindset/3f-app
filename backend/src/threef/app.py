@@ -42,6 +42,30 @@ class ResponsibilityLevel(str, Enum):
     UNBREAKABLE = "unbreakable"
 
 
+class ProgramRole(str, Enum):
+    PARTICIPANT = "participant"
+    COACH = "coach"
+    CAPTAIN = "captain"
+    ADMINISTRATOR = "administrator"
+
+
+class CircleType(str, Enum):
+    SMALL_GROUP = "small_group"
+    BUDDY = "buddy"
+    TRIAD = "triad"
+
+
+class ChannelType(str, Enum):
+    WHOLE_CRUCIBLE = "whole_crucible"
+    SMALL_GROUP = "small_group"
+    BUDDY = "buddy"
+    TRIAD = "triad"
+    COACH_DIRECT = "coach_direct"
+    CAPTAIN_DIRECT = "captain_direct"
+    LEADERSHIP = "leadership"
+    PARTICIPANT_PRIVATE = "participant_private"
+
+
 MOMENTUM_DEFINITIONS: dict[MomentumLevel, tuple[int, str, str]] = {
     MomentumLevel.CLOGGED: (1, "Clogged", "I feel backed up with thoughts and emotions I have not faced; everything in me feels heavy, slow, and resistant to movement."),
     MomentumLevel.TOXIC: (2, "Toxic", "I notice resentment, envy, or frustration leaking into everything; my fire burns dirty and distorts how I see things."),
@@ -187,11 +211,69 @@ class CoachReviewCommand(BaseModel):
     request_revision: bool = False
 
 
+class CreateCrucibleCommand(BaseModel):
+    command_id: str = Field(default_factory=lambda: str(uuid4()))
+    crucible_id: str = Field(min_length=3, max_length=80)
+    name: str = Field(min_length=3, max_length=120)
+    review_week_start: str = Field(min_length=10, max_length=10)
+    refinement_week_start: str = Field(min_length=10, max_length=10)
+    launch_date: str = Field(min_length=10, max_length=10)
+
+
+class EnrollMemberCommand(BaseModel):
+    command_id: str = Field(default_factory=lambda: str(uuid4()))
+    member_id: str = Field(min_length=3, max_length=80)
+    name: str = Field(min_length=2, max_length=100)
+    role: ProgramRole
+
+
+class AssignRelationshipCommand(BaseModel):
+    command_id: str = Field(default_factory=lambda: str(uuid4()))
+    member_id: str = Field(min_length=3, max_length=80)
+    mentor_id: str = Field(min_length=3, max_length=80)
+
+
+class CreateCircleCommand(BaseModel):
+    command_id: str = Field(default_factory=lambda: str(uuid4()))
+    circle_id: str = Field(min_length=3, max_length=80)
+    name: str = Field(min_length=2, max_length=100)
+    kind: CircleType
+    member_ids: list[str] = Field(min_length=2, max_length=12)
+    coach_sponsor_id: str | None = Field(default=None, min_length=3, max_length=80)
+
+    @field_validator("member_ids")
+    @classmethod
+    def unique_members(cls, member_ids: list[str]) -> list[str]:
+        if len(member_ids) != len(set(member_ids)):
+            raise ValueError("Circle members must be unique.")
+        return member_ids
+
+
+class CreateChannelCommand(BaseModel):
+    command_id: str = Field(default_factory=lambda: str(uuid4()))
+    channel_id: str = Field(min_length=3, max_length=80)
+    name: str = Field(min_length=2, max_length=100)
+    kind: ChannelType
+    member_ids: list[str] = Field(min_length=2, max_length=50)
+    circle_id: str | None = Field(default=None, min_length=3, max_length=80)
+
+    @field_validator("member_ids")
+    @classmethod
+    def unique_channel_members(cls, member_ids: list[str]) -> list[str]:
+        if len(member_ids) != len(set(member_ids)):
+            raise ValueError("Channel members must be unique.")
+        return member_ids
+
+
 @dataclass
 class MemberProjection:
     member_id: str
     name: str = ""
     coach_name: str = ""
+    role: ProgramRole | None = None
+    crucible_id: str = ""
+    coach_id: str | None = None
+    captain_id: str | None = None
     season_plan: dict[str, Any] | None = None
     calibrations: list[dict[str, Any]] = field(default_factory=list)
     reviews: dict[int, dict[str, Any]] = field(default_factory=dict)
@@ -200,6 +282,9 @@ class MemberProjection:
 class ReadModel:
     def __init__(self) -> None:
         self.members: dict[str, MemberProjection] = {}
+        self.crucibles: dict[str, dict[str, Any]] = {}
+        self.circles: dict[str, dict[str, Any]] = {}
+        self.channels: dict[str, dict[str, Any]] = {}
 
     def member(self, member_id: str) -> MemberProjection:
         if member_id not in self.members:
@@ -208,10 +293,23 @@ class ReadModel:
 
     def apply(self, event: DomainEvent) -> None:
         payload = event.payload
-        if event.name == "MemberEnrolledInCrucible":
+        if event.name == "CrucibleCreated":
+            self.crucibles[payload["crucible_id"]] = payload
+        elif event.name == "MemberEnrolledInCrucible":
             member = self.member(payload["member_id"])
             member.name = payload["name"]
-            member.coach_name = payload["coach_name"]
+            member.role = ProgramRole(payload["role"])
+            member.crucible_id = payload["crucible_id"]
+        elif event.name == "CoachAssignedToParticipant":
+            participant = self.member(payload["member_id"])
+            participant.coach_id = payload["mentor_id"]
+            participant.coach_name = self.member(payload["mentor_id"]).name
+        elif event.name == "CaptainAssignedToCoach":
+            self.member(payload["member_id"]).captain_id = payload["mentor_id"]
+        elif event.name == "CircleCreated":
+            self.circles[payload["circle_id"]] = payload
+        elif event.name == "ChannelCreated":
+            self.channels[payload["channel_id"]] = payload
         elif event.name == "SeasonPlanSubmitted":
             self.member(payload["member_id"]).season_plan = payload
         elif event.name == "WeeklyCalibrationSubmitted":
@@ -235,9 +333,92 @@ class ApplicationService:
     def seed(self) -> None:
         if self.read_model.members:
             return
-        self._append("member:demo-member", "seed-member", "MemberEnrolledInCrucible", {
-            "member_id": "demo-member", "name": "Marcus", "coach_name": "Coach Elias", "crucible_name": "The Stewardship Season"
+        self._append("crucible:demo-crucible", "seed-crucible", "CrucibleCreated", {
+            "crucible_id": "demo-crucible", "name": "The Stewardship Season", "review_week_start": "2026-06-23", "refinement_week_start": "2026-06-30", "launch_date": "2026-07-07"
         })
+        for member_id, name, role in [
+            ("captain-silas", "Captain Silas", ProgramRole.CAPTAIN),
+            ("coach-elias", "Coach Elias", ProgramRole.COACH),
+            ("demo-member", "Marcus", ProgramRole.PARTICIPANT),
+        ]:
+            self._append(f"member:{member_id}", f"seed-member-{member_id}", "MemberEnrolledInCrucible", {
+                "crucible_id": "demo-crucible", "member_id": member_id, "name": name, "role": role.value
+            })
+        self._append("relationship:demo-member:coach", "seed-coach-assignment", "CoachAssignedToParticipant", {"crucible_id": "demo-crucible", "member_id": "demo-member", "mentor_id": "coach-elias"})
+        self._append("relationship:coach-elias:captain", "seed-captain-assignment", "CaptainAssignedToCoach", {"crucible_id": "demo-crucible", "member_id": "coach-elias", "mentor_id": "captain-silas"})
+
+    def create_crucible(self, command: CreateCrucibleCommand) -> dict[str, Any]:
+        if command.crucible_id in self.read_model.crucibles:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Crucible already exists.")
+        events = self._append(f"crucible:{command.crucible_id}", command.command_id, "CrucibleCreated", command.model_dump())
+        return {"event_ids": [event.id for event in events], "crucible_id": command.crucible_id}
+
+    def enroll_member(self, crucible_id: str, command: EnrollMemberCommand) -> dict[str, Any]:
+        crucible = self.crucible_or_404(crucible_id)
+        if command.member_id in self.read_model.members:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Member already exists in a Crucible.")
+        payload = command.model_dump() | {"crucible_id": crucible["crucible_id"]}
+        events = self._append(f"member:{command.member_id}", command.command_id, "MemberEnrolledInCrucible", payload)
+        return {"event_ids": [event.id for event in events], "member_id": command.member_id}
+
+    def assign_coach(self, crucible_id: str, command: AssignRelationshipCommand) -> dict[str, Any]:
+        participant = self.member_in_crucible_or_404(command.member_id, crucible_id)
+        coach = self.member_in_crucible_or_404(command.mentor_id, crucible_id)
+        if participant.role != ProgramRole.PARTICIPANT or coach.role != ProgramRole.COACH:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Coach assignments require a participant and a Coach.")
+        events = self._append(f"relationship:{command.member_id}:coach", command.command_id, "CoachAssignedToParticipant", command.model_dump() | {"crucible_id": crucible_id})
+        return {"event_ids": [event.id for event in events], "status": "assigned"}
+
+    def assign_captain(self, crucible_id: str, command: AssignRelationshipCommand) -> dict[str, Any]:
+        coach = self.member_in_crucible_or_404(command.member_id, crucible_id)
+        captain = self.member_in_crucible_or_404(command.mentor_id, crucible_id)
+        if coach.role != ProgramRole.COACH or captain.role != ProgramRole.CAPTAIN:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Captain assignments require a Coach and a Captain.")
+        events = self._append(f"relationship:{command.member_id}:captain", command.command_id, "CaptainAssignedToCoach", command.model_dump() | {"crucible_id": crucible_id})
+        return {"event_ids": [event.id for event in events], "status": "assigned"}
+
+    def create_circle(self, crucible_id: str, command: CreateCircleCommand) -> dict[str, Any]:
+        self.crucible_or_404(crucible_id)
+        if command.circle_id in self.read_model.circles:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Circle already exists.")
+        expected_size = {CircleType.BUDDY: 2, CircleType.TRIAD: 3}.get(command.kind)
+        if expected_size is not None and len(command.member_ids) != expected_size:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=f"{command.kind.value} circles require exactly {expected_size} members.")
+        for member_id in command.member_ids:
+            self.member_in_crucible_or_404(member_id, crucible_id)
+        if command.coach_sponsor_id is not None:
+            sponsor = self.member_in_crucible_or_404(command.coach_sponsor_id, crucible_id)
+            if sponsor.role != ProgramRole.COACH:
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A circle sponsor must be a Coach.")
+        payload = command.model_dump() | {"crucible_id": crucible_id}
+        events = self._append(f"circle:{command.circle_id}", command.command_id, "CircleCreated", payload)
+        return {"event_ids": [event.id for event in events], "circle_id": command.circle_id}
+
+    def create_channel(self, crucible_id: str, command: CreateChannelCommand) -> dict[str, Any]:
+        crucible = self.crucible_or_404(crucible_id)
+        if command.channel_id in self.read_model.channels:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Channel already exists.")
+        for member_id in command.member_ids:
+            self.member_in_crucible_or_404(member_id, crucible_id)
+        if command.kind == ChannelType.WHOLE_CRUCIBLE:
+            expected_members = {member_id for member_id, member in self.read_model.members.items() if member.crucible_id == crucible_id}
+            if set(command.member_ids) != expected_members:
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A whole-Crucible channel must include every enrolled member.")
+        if command.circle_id is not None:
+            circle = self.read_model.circles.get(command.circle_id)
+            if circle is None or circle["crucible_id"] != crucible_id:
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Channel circle must belong to this Crucible.")
+            expected_members = set(circle["member_ids"])
+            if circle["coach_sponsor_id"] is not None:
+                expected_members.add(circle["coach_sponsor_id"])
+            if set(command.member_ids) != expected_members:
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Circle channel membership must match the circle and its Coach sponsor.")
+        if command.kind == ChannelType.PARTICIPANT_PRIVATE:
+            if any(self.member_or_404(member_id).role != ProgramRole.PARTICIPANT for member_id in command.member_ids):
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Participant-private channels cannot include Coaches or Captains.")
+        payload = command.model_dump() | {"crucible_id": crucible["crucible_id"]}
+        events = self._append(f"channel:{command.channel_id}", command.command_id, "ChannelCreated", payload)
+        return {"event_ids": [event.id for event in events], "channel_id": command.channel_id}
 
     def submit_plan(self, command: SeasonPlanCommand) -> dict[str, Any]:
         self.member_or_404(command.member_id)
@@ -255,11 +436,11 @@ class ApplicationService:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This week is already submitted. A Coach must reopen it before revision.")
         plan_values = member.season_plan["values"]
         if command.value_in_focus not in plan_values or command.value_most_neglected not in plan_values:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Weekly values must be selected from the Season Plan.")
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Weekly values must be selected from the Season Plan.")
         if command.value_in_focus == command.value_most_neglected:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Choose different values for most in focus and most neglected.")
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Choose different values for most in focus and most neglected.")
         if command.role_to_forge not in member.season_plan["roles"]:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="The role to forge must be selected from the Season Plan.")
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="The role to forge must be selected from the Season Plan.")
         payload = command.model_dump()
         payload["status"] = "submitted"
         payload["submitted_at"] = datetime.now(timezone.utc).isoformat()
@@ -294,6 +475,27 @@ class ApplicationService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found.")
         return self.read_model.members[member_id]
 
+    def crucible_or_404(self, crucible_id: str) -> dict[str, Any]:
+        if crucible_id not in self.read_model.crucibles:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Crucible not found.")
+        return self.read_model.crucibles[crucible_id]
+
+    def member_in_crucible_or_404(self, member_id: str, crucible_id: str) -> MemberProjection:
+        member = self.member_or_404(member_id)
+        if member.crucible_id != crucible_id:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Member is not enrolled in this Crucible.")
+        return member
+
+    def crucible_detail(self, crucible_id: str) -> dict[str, Any]:
+        crucible = self.crucible_or_404(crucible_id)
+        members = [
+            {"member_id": member.member_id, "name": member.name, "role": member.role.value if member.role else None, "coach_id": member.coach_id, "captain_id": member.captain_id}
+            for member in self.read_model.members.values() if member.crucible_id == crucible_id
+        ]
+        circles = [circle for circle in self.read_model.circles.values() if circle["crucible_id"] == crucible_id]
+        channels = [channel for channel in self.read_model.channels.values() if channel["crucible_id"] == crucible_id]
+        return {"crucible": crucible, "members": members, "circles": circles, "channels": channels}
+
 
 def create_app() -> FastAPI:
     app = FastAPI(title="3F API", version="0.1.0")
@@ -316,6 +518,34 @@ def create_app() -> FastAPI:
     @app.get("/api/dashboard/{member_id}")
     def dashboard(member_id: str) -> dict[str, Any]:
         return service.dashboard(member_id)
+
+    @app.post("/api/crucibles", status_code=status.HTTP_201_CREATED)
+    def create_crucible(command: CreateCrucibleCommand) -> dict[str, Any]:
+        return service.create_crucible(command)
+
+    @app.get("/api/crucibles/{crucible_id}")
+    def crucible_detail(crucible_id: str) -> dict[str, Any]:
+        return service.crucible_detail(crucible_id)
+
+    @app.post("/api/crucibles/{crucible_id}/members", status_code=status.HTTP_201_CREATED)
+    def enroll_member(crucible_id: str, command: EnrollMemberCommand) -> dict[str, Any]:
+        return service.enroll_member(crucible_id, command)
+
+    @app.post("/api/crucibles/{crucible_id}/coach-assignments", status_code=status.HTTP_201_CREATED)
+    def assign_coach(crucible_id: str, command: AssignRelationshipCommand) -> dict[str, Any]:
+        return service.assign_coach(crucible_id, command)
+
+    @app.post("/api/crucibles/{crucible_id}/captain-assignments", status_code=status.HTTP_201_CREATED)
+    def assign_captain(crucible_id: str, command: AssignRelationshipCommand) -> dict[str, Any]:
+        return service.assign_captain(crucible_id, command)
+
+    @app.post("/api/crucibles/{crucible_id}/circles", status_code=status.HTTP_201_CREATED)
+    def create_circle(crucible_id: str, command: CreateCircleCommand) -> dict[str, Any]:
+        return service.create_circle(crucible_id, command)
+
+    @app.post("/api/crucibles/{crucible_id}/channels", status_code=status.HTTP_201_CREATED)
+    def create_channel(crucible_id: str, command: CreateChannelCommand) -> dict[str, Any]:
+        return service.create_channel(crucible_id, command)
 
     @app.post("/api/season-plans", status_code=status.HTTP_201_CREATED)
     def submit_plan(command: SeasonPlanCommand) -> dict[str, Any]:

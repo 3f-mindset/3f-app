@@ -394,6 +394,18 @@ Build user profiles, roles, Crucible dates, memberships, Coach/Captain assignmen
 
 **Exit:** An administrator creates a pilot Crucible without engineering support; all private data and channel boundaries are enforced.
 
+#### Current POC APIs
+
+The local event-sourced API now supports the foundation of this milestone:
+
+- `POST /api/crucibles` and `GET /api/crucibles/{crucible_id}` for a cycle and its operational projection.
+- `POST /api/crucibles/{crucible_id}/members` to enroll a Participant, Coach, Captain, or Administrator.
+- `POST /api/crucibles/{crucible_id}/coach-assignments` and `/captain-assignments` for reporting relationships.
+- `POST /api/crucibles/{crucible_id}/circles` for small groups, buddy pairs, and triads, including an optional Coach sponsor.
+- `POST /api/crucibles/{crucible_id}/channels` for explicit channel membership.
+
+The POC validates that buddy pairs have two members, triads have three, Coach sponsors are Coaches in the same Crucible, circle channels match their circle membership, and participant-private channels exclude Coaches and Captains.
+
 ### Milestone 2: Season Design Journey
 
 Build the full 12-week season plan flow, review/refinement dates, Coach review, Captain structure, goal and container tracking, scoreboards, and weekly review rhythm.
