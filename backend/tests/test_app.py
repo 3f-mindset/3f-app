@@ -73,6 +73,24 @@ def test_calibration_requires_plan() -> None:
     assert response.status_code == 409
 
 
+def test_only_assigned_coach_can_review_calibration() -> None:
+    client = TestClient(create_app())
+    assert client.post("/api/season-plans", json=plan_payload()).status_code == 201
+    assert client.post("/api/calibrations", json=calibration_payload()).status_code == 201
+
+    unassigned = client.post("/api/calibrations/demo-member/1/review", json={
+        "command_id": "captain-review", "coach_id": "captain-silas", "feedback": "This must not be accepted.",
+    })
+    assert unassigned.status_code == 403
+    assert client.get("/api/dashboard/demo-member").json()["latest_review"] is None
+
+    assigned = client.post("/api/calibrations/demo-member/1/review", json={
+        "command_id": "assigned-review", "coach_id": "coach-elias", "feedback": "Keep protecting the conversation you cleared.",
+    })
+    assert assigned.status_code == 201
+    assert client.get("/api/dashboard/demo-member").json()["latest_review"]["coach_id"] == "coach-elias"
+
+
 def test_development_account_switcher_projection() -> None:
     client = TestClient(create_app(development_mode=True))
     accounts = client.get("/api/development/accounts").json()

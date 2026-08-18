@@ -4,7 +4,7 @@ This file is the source of truth for the autonomous delivery loop. Work one item
 
 ## Current Milestone: Coach Review And Operational Visibility
 
-- [ ] **P0 - Enforce assigned-Coach calibration review.** Require the reviewer to be the participant's assigned Coach, prevent unassigned review submission, and add authorization tests.
+- [x] **P0 - Enforce assigned-Coach calibration review.** Require the reviewer to be the participant's assigned Coach, prevent unassigned review submission, and add authorization tests.
 - [ ] **P0 - Build Coach review workflow.** In the Coach Anvil, open an assigned student's submitted calibration, show the six 3F sections in context, and submit participant-visible feedback or a revision request.
 - [ ] **P0 - Show participant feedback.** Render Coach feedback and revision state in the participant Anvil, including a clear next action after a requested revision.
 - [ ] **P1 - Build Captain visibility.** Allow Captains to see assigned Coach completion/review status through relationship-checked records; do not expose participant private calibration content by default.

@@ -450,6 +450,13 @@ class ApplicationService:
 
     def review_calibration(self, member_id: str, week: int, command: CoachReviewCommand) -> dict[str, Any]:
         member = self.member_or_404(member_id)
+        coach = self.member_or_404(command.coach_id)
+        if (
+            member.role != ProgramRole.PARTICIPANT
+            or coach.role != ProgramRole.COACH
+            or member.coach_id != command.coach_id
+        ):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Coach is not assigned to this participant.")
         if not any(item["week"] == week for item in member.calibrations):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Weekly calibration not found.")
         payload = command.model_dump() | {"member_id": member_id, "week": week, "reviewed_at": datetime.now(timezone.utc).isoformat()}
