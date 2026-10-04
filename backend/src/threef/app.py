@@ -274,6 +274,12 @@ class CoachReviewCommand(BaseModel):
     request_revision: bool = False
 
 
+class ReopenCalibrationCommand(BaseModel):
+    command_id: str = Field(default_factory=lambda: str(uuid4()))
+    coach_id: str = Field(min_length=1)
+    reason: str = Field(min_length=5, max_length=2000)
+
+
 class CreateCrucibleCommand(BaseModel):
     command_id: str = Field(default_factory=lambda: str(uuid4()))
     crucible_id: str = Field(min_length=3, max_length=80)
@@ -340,6 +346,7 @@ class MemberProjection:
     season_plan: dict[str, Any] | None = None
     calibrations: list[dict[str, Any]] = field(default_factory=list)
     reviews: dict[int, dict[str, Any]] = field(default_factory=dict)
+    reopened_weeks: set[int] = field(default_factory=set)
 
 
 class ReadModel:
@@ -377,8 +384,11 @@ class ReadModel:
             self.member(payload["member_id"]).season_plan = payload
         elif event.name == "WeeklyCalibrationSubmitted":
             self.member(payload["member_id"]).calibrations.append(payload)
+            self.member(payload["member_id"]).reopened_weeks.discard(payload["week"])
         elif event.name == "WeeklyCalibrationReviewed":
             self.member(payload["member_id"]).reviews[payload["week"]] = payload
+        elif event.name == "WeeklyCalibrationReopened":
+            self.member(payload["member_id"]).reopened_weeks.add(payload["week"])
 
 
 class ApplicationService:
@@ -497,7 +507,7 @@ class ApplicationService:
         member = self.member_or_404(command.member_id)
         if member.season_plan is None:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A Season Plan must be submitted before a weekly calibration.")
-        if any(item["week"] == command.week for item in member.calibrations):
+        if any(item["week"] == command.week for item in member.calibrations) and command.week not in member.reopened_weeks:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This week is already submitted. A Coach must reopen it before revision.")
         plan_values = member.season_plan["values"]
         if command.value_in_focus not in plan_values or command.value_most_neglected not in plan_values:
@@ -528,10 +538,33 @@ class ApplicationService:
         events = self._append(f"review:{member_id}:{week}", command.command_id, "WeeklyCalibrationReviewed", payload)
         return {"event_ids": [event.id for event in events], "status": "revision_requested" if command.request_revision else "reviewed"}
 
+    def reopen_calibration(self, member_id: str, week: int, command: ReopenCalibrationCommand) -> dict[str, Any]:
+        member = self.member_or_404(member_id)
+        coach = self.member_or_404(command.coach_id)
+        if (
+            member.role != ProgramRole.PARTICIPANT
+            or coach.role != ProgramRole.COACH
+            or member.coach_id != command.coach_id
+        ):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Coach is not assigned to this participant.")
+        if not any(item["week"] == week for item in member.calibrations):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Weekly calibration not found.")
+        if week in member.reopened_weeks:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This week is already reopened.")
+        payload = command.model_dump() | {"member_id": member_id, "week": week, "reopened_at": datetime.now(timezone.utc).isoformat()}
+        events = self._append(f"reopen:{member_id}:{week}", command.command_id, "WeeklyCalibrationReopened", payload)
+        return {"event_ids": [event.id for event in events], "status": "reopened"}
+
     def dashboard(self, member_id: str) -> dict[str, Any]:
         member = self.member_or_404(member_id)
         latest = member.calibrations[-1] if member.calibrations else None
-        current_week = (latest["week"] + 1) if latest and latest["week"] < 12 else (latest["week"] if latest else 1)
+        reopened_weeks = sorted(member.reopened_weeks)
+        if reopened_weeks:
+            current_week = reopened_weeks[-1]
+        elif latest and latest["week"] < 12:
+            current_week = latest["week"] + 1
+        else:
+            current_week = latest["week"] if latest else 1
         direct_reports = [
             {"member_id": candidate.member_id, "name": candidate.name, "role": candidate.role.value if candidate.role else None}
             for candidate in self.read_model.members.values()
@@ -548,6 +581,7 @@ class ApplicationService:
             "latest_review": member.reviews.get(latest["week"]) if latest else None,
             "current_week": current_week,
             "calibration_count": len(member.calibrations),
+            "reopened_weeks": reopened_weeks,
             "direct_reports": direct_reports,
         }
 
@@ -707,6 +741,10 @@ def create_app(development_mode: bool | None = None) -> FastAPI:
     @app.post("/api/calibrations/{member_id}/{week}/review", status_code=status.HTTP_201_CREATED)
     def review_calibration(member_id: str, week: int, command: CoachReviewCommand) -> dict[str, Any]:
         return service.review_calibration(member_id, week, command)
+
+    @app.post("/api/calibrations/{member_id}/{week}/reopen", status_code=status.HTTP_201_CREATED)
+    def reopen_calibration(member_id: str, week: int, command: ReopenCalibrationCommand) -> dict[str, Any]:
+        return service.reopen_calibration(member_id, week, command)
 
     @app.get("/api/events")
     def events() -> list[dict[str, Any]]:

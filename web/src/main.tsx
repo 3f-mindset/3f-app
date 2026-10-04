@@ -13,10 +13,11 @@ type Calibration = {
   role_to_forge: string; strikes: Strike[];
 };
 type Dashboard = {
-  member_id: string; name: string; role: "participant" | "coach" | "captain" | "administrator" | null; coach_name: string; current_week: number; calibration_count: number;
+  member_id: string; name: string; role: "participant" | "coach" | "captain" | "administrator" | null; coach_name: string;   current_week: number; calibration_count: number;
   season_plan: { season_name: string } | null;
   latest_calibration: Calibration | null;
   latest_review: { feedback: string; request_revision: boolean } | null;
+  reopened_weeks: number[];
   direct_reports: DevelopmentAccount[];
 };
 type DevelopmentAccount = { member_id: string; name: string; role: "participant" | "coach" | "captain" | "administrator" };
@@ -130,11 +131,12 @@ function Deck({ eyebrow, steps, submitLabel, onSubmit }: { eyebrow: string; step
   </section>;
 }
 
-function CoachReview({ participant, participants, feedback, requestRevision, onFeedbackChange, onRequestRevisionChange, onOpen, onSubmit }: {
+function CoachReview({ participant, participants, feedback, requestRevision, onFeedbackChange, onRequestRevisionChange, onOpen, onSubmit, onReopen }: {
   participant: Dashboard | null; participants: Dashboard[]; feedback: string; requestRevision: boolean; onFeedbackChange: (value: string) => void;
-  onRequestRevisionChange: (value: boolean) => void; onOpen: (participantId: string) => void; onSubmit: () => void;
+  onRequestRevisionChange: (value: boolean) => void; onOpen: (participantId: string) => void; onSubmit: () => void; onReopen: () => void;
 }) {
   const calibration = participant?.latest_calibration;
+  const reopened = Boolean(participant && calibration && participant.reopened_weeks?.includes(calibration.week));
   if (!participant || !calibration) return <section className="review-empty"><p className="eyebrow">Coach review</p><h1>Choose a submitted calibration.</h1><p className="lead">Open an assigned participant to see his complete 3F read.</p><div className="review-queue">{participants.filter((record) => record.latest_calibration).map((record) => <button type="button" key={record.member_id} onClick={() => onOpen(record.member_id)}><span>{record.name}</span><b>Week {record.latest_calibration?.week} submitted</b></button>)}{participants.length > 0 && !participants.some((record) => record.latest_calibration) && <p>No assigned participant has submitted a calibration yet.</p>}{participants.length === 0 && <p>Loading assigned participant records...</p>}</div></section>;
   return <section className="coach-review">
     <p className="eyebrow">Coach review · Week {calibration.week}</p><h1>{participant.name}'s submitted 3F read</h1>
@@ -147,17 +149,17 @@ function CoachReview({ participant, participants, feedback, requestRevision, onF
       <article><p className="eyebrow">5. Friction · Slag Channel</p><dl className="stacked-definition"><div><dt>Avoided</dt><dd>{calibration.avoided}</dd></div><div><dt>Drain</dt><dd>{calibration.drain}</dd></div><div><dt>Unreleased weight</dt><dd>{calibration.unreleased_weight}</dd></div></dl></article>
       <article><p className="eyebrow">6. Cultivation · Hammer</p><h2>Forge: {calibration.role_to_forge}</h2><ol>{calibration.strikes.map((strike) => <li key={strike.action}><b>{strike.action}</b><span>{strike.measure}</span></li>)}</ol></article>
     </div>
-    <section className="review-response"><p className="eyebrow">Participant-visible response</p><label>Feedback<textarea value={feedback} onChange={(event) => onFeedbackChange(event.target.value)} placeholder="Offer a concise, concrete response." /></label><label className="revision-toggle"><input type="checkbox" checked={requestRevision} onChange={(event) => onRequestRevisionChange(event.target.checked)} /> Request a revision</label><button className="primary" onClick={onSubmit} disabled={feedback.trim().length < 5}>{requestRevision ? "Request revision" : "Submit feedback"}</button></section>
+    <section className="review-response"><p className="eyebrow">Participant-visible response</p><label>Feedback<textarea value={feedback} onChange={(event) => onFeedbackChange(event.target.value)} placeholder="Offer a concise, concrete response." /></label><label className="revision-toggle"><input type="checkbox" checked={requestRevision} onChange={(event) => onRequestRevisionChange(event.target.checked)} /> Request a revision</label><button className="primary" onClick={onSubmit} disabled={feedback.trim().length < 5}>{requestRevision ? "Request revision" : "Submit feedback"}</button>{reopened ? <p className="next-action"><b>Week {calibration.week} is open.</b> {participant.name} can revise and resubmit. Reopening preserved the original submission.</p> : <button className="back" onClick={onReopen} disabled={feedback.trim().length < 5}>Reopen week {calibration.week} for revision</button>}</section>
   </section>;
 }
 
-function ParticipantReview({ review }: { review: NonNullable<Dashboard["latest_review"]> }) {
+function ParticipantReview({ review, reopened }: { review: NonNullable<Dashboard["latest_review"]>; reopened: boolean }) {
   const revisionRequested = review.request_revision;
   return <article className={`coach-feedback ${revisionRequested ? "revision-requested" : ""}`}>
     <p className="eyebrow">Coach feedback</p>
-    <h2>{revisionRequested ? "Your Coach requested a revision" : "Your Coach has reviewed this calibration"}</h2>
+    <h2>{reopened ? "This week is open for revision" : revisionRequested ? "Your Coach requested a revision" : "Your Coach has reviewed this calibration"}</h2>
     <blockquote>{review.feedback}</blockquote>
-    <p className="next-action"><b>Next action:</b> {revisionRequested ? "Review this feedback and prepare your revision. Your Coach must reopen this submitted week before you can submit it again." : "Carry this feedback into your next weekly calibration."}</p>
+    <p className="next-action"><b>Next action:</b> {reopened ? "Revise your read and resubmit when ready. Your earlier submission is preserved." : revisionRequested ? "Review this feedback and prepare your revision. Your Coach must reopen this submitted week before you can submit it again." : "Carry this feedback into your next weekly calibration."}</p>
   </article>;
 }
 
@@ -276,6 +278,16 @@ function App() {
       refresh(); setScreen("anvil");
     } catch { setNotice("The review was not sent. Reconnect and try again."); }
   };
+  const reopenCalibration = async () => {
+    const calibration = reviewParticipant?.latest_calibration;
+    if (!reviewParticipant || !calibration) return;
+    try {
+      const command_id = commandId();
+      await send({ id: command_id, endpoint: `/api/calibrations/${reviewParticipant.member_id}/${calibration.week}/reopen`, body: { command_id, coach_id: activeMemberId, reason: feedback } });
+      setNotice(`Week ${calibration.week} reopened. ${reviewParticipant.name} can revise and resubmit.`);
+      refresh(); setScreen("anvil");
+    } catch { setNotice("The week was not reopened. Reconnect and try again."); }
+  };
 
   const planRoles = split(plan.roles);
   const planValues = split(plan.values);
@@ -308,12 +320,12 @@ function App() {
     {DEVELOPMENT_MODE && accounts.length > 0 && <label className="account-switcher"><span>Development account</span><select value={activeMemberId} onChange={(event) => switchAccount(event.target.value)}>{accounts.map((account) => <option value={account.member_id} key={account.member_id}>{account.name} · {account.role}</option>)}</select></label>}
     <nav><button className={screen === "anvil" ? "active" : ""} onClick={() => setScreen("anvil")}>Anvil</button>{isParticipant && <button className={screen === "plan" ? "active" : ""} onClick={() => setScreen("plan")}>Season Plan</button>}{isParticipant && <button className={screen === "calibration" ? "active" : ""} onClick={() => setScreen("calibration")}>Weekly Calibration</button>}{dashboard?.role === "coach" && <button className={screen === "coach-review" ? "active" : ""} onClick={() => setScreen("coach-review")}>Coach review</button>}{DEVELOPMENT_MODE && dashboard?.role === "administrator" && <button className={screen === "administrator-setup" ? "active" : ""} onClick={() => setScreen("administrator-setup")}>Setup</button>}</nav>
     {notice && <aside className="notice">{notice}</aside>}
-    {screen === "anvil" && isParticipant && dashboard?.latest_review && <ParticipantReview review={dashboard.latest_review} />}
+    {screen === "anvil" && isParticipant && dashboard?.latest_review && <ParticipantReview review={dashboard.latest_review} reopened={Boolean(dashboard?.latest_calibration && dashboard.reopened_weeks?.includes(dashboard.latest_calibration.week))} />}
     {screen === "anvil" && dashboard?.role === "captain" && <CaptainVisibility records={captainRecords} />}
     {screen === "anvil" && <section className="home"><p className="eyebrow">{dashboard?.role ?? "Account"} · {dashboard?.season_plan?.season_name ?? "The Stewardship Season"}</p><h1>{dashboard ? `The Anvil, ${dashboard.name}.` : "The Anvil."}</h1><p className="lead">{isParticipant ? "A clear read on what you are feeding, holding, and releasing." : "A development view of the people and responsibilities entrusted to you."}</p>{isParticipant ? <><div className="cards"><article><span>Current week</span><strong>{dashboard?.current_week ?? 1} / 12</strong><p>{dashboard?.calibration_count ?? 0} calibrations recorded</p></article><article><span>Coach</span><strong>{dashboard?.coach_name ?? "Loading..."}</strong><p>{dashboard?.latest_review ? "Latest feedback is ready" : "Your witness in the work"}</p></article><article><span>Next strike</span><strong>{dashboard?.latest_calibration?.strikes?.[0]?.action ?? "Build your Season Plan"}</strong><p>{dashboard?.latest_calibration?.role_to_forge ? `Forge: ${dashboard.latest_calibration.role_to_forge}` : "Start with stewardship"}</p></article></div>{dashboard?.latest_calibration && <article className="read-summary"><p className="eyebrow">Last calibration</p><h2>{dashboard.latest_calibration.aim}</h2><p>Furnace read: <b>{dashboard.latest_calibration.momentum_level.replace("_", " ")}</b></p>{dashboard.latest_review && <blockquote>{dashboard.latest_review.feedback}</blockquote>}</article>}<button className="primary" onClick={() => setScreen(dashboard?.season_plan ? "calibration" : "plan")}>{dashboard?.season_plan ? "Begin weekly calibration" : "Build the season plan"}</button></> : <><div className="cards"><article><span>Role</span><strong>{dashboard?.role}</strong><p>Development account view</p></article><article><span>Direct reports</span><strong>{dashboard?.direct_reports.length ?? 0}</strong><p>{dashboard?.role === "coach" ? "Participants assigned to you" : "Coaches assigned to you"}</p></article></div>{dashboard?.role === "coach" ? <section className="record-list"><p className="eyebrow">Student records</p>{coachRecords.length ? coachRecords.map((record) => <article key={record.member_id}><div><strong>{record.name}</strong><span>{record.season_plan?.season_name ?? "Season Plan not submitted"}</span></div><dl><div><dt>Calibrations</dt><dd>{record.calibration_count}</dd></div><div><dt>Current week</dt><dd>{record.current_week} / 12</dd></div></dl>{record.latest_calibration ? <p><b>Latest aim:</b> {record.latest_calibration.aim}</p> : <p>No weekly calibration submitted yet.</p>}</article>) : <p className="lead">Loading assigned student records...</p>}</section> : <section className="report-list"><p className="eyebrow">Your people</p>{dashboard?.direct_reports.length ? dashboard.direct_reports.map((report) => <article key={report.member_id}><strong>{report.name}</strong><span>{report.role}</span></article>) : <p className="lead">No direct reports are assigned yet.</p>}</section>}</>}</section>}
     {screen === "plan" && <Deck eyebrow="Season Plan" steps={planSteps} submitLabel="Submit season plan" onSubmit={submitPlan} />}
     {screen === "calibration" && <Deck eyebrow={`Week ${dashboard?.current_week ?? 1} · Weekly Calibration`} steps={calibrationSteps} submitLabel="Submit calibration" onSubmit={submitCalibration} />}
-    {screen === "coach-review" && <CoachReview participant={reviewParticipant} participants={coachRecords} feedback={feedback} requestRevision={requestRevision} onFeedbackChange={setFeedback} onRequestRevisionChange={setRequestRevision} onOpen={(participantId) => void openCoachReview(participantId)} onSubmit={submitCoachReview} />}
+    {screen === "coach-review" && <CoachReview participant={reviewParticipant} participants={coachRecords} feedback={feedback} requestRevision={requestRevision} onFeedbackChange={setFeedback} onRequestRevisionChange={setRequestRevision} onOpen={(participantId) => void openCoachReview(participantId)} onSubmit={submitCoachReview} onReopen={() => void reopenCalibration()} />}
     {DEVELOPMENT_MODE && screen === "administrator-setup" && dashboard?.role === "administrator" && <AdministratorSetup onNotice={setNotice} onAccountsChanged={refreshAccounts} />}
   </main>;
 }

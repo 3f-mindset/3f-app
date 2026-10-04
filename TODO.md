@@ -13,7 +13,7 @@ This file is the source of truth for the autonomous delivery loop. Work one item
 ## Next Milestone: Reliable Weekly Operation
 
 - [x] **P1 - Version templates.** Persist versioned Season Plan and 3F calibration templates with the exact prompts and scale definitions used for a submission.
-- [ ] **P1 - Add calibration reopen events.** Let an assigned Coach request a revision, reopen the correct weekly record, and preserve submission history.
+- [x] **P1 - Add calibration reopen events.** Let an assigned Coach request a revision, reopen the correct weekly record, and preserve submission history.
 - [ ] **P1 - Add weekly due-state projection.** Project opened, due soon, overdue, submitted, and reviewed state for each participant and week.
 - [ ] **P2 - Complete offline command recovery.** Add an explicit outbox status view, retry action, and conflict state for rejected queued commands.
 

@@ -137,6 +137,65 @@ def test_only_assigned_coach_can_review_calibration() -> None:
     assert latest_review["request_revision"] is True
 
 
+def test_assigned_coach_reopens_week_and_preserves_submission_history() -> None:
+    client = TestClient(create_app())
+    assert client.post("/api/season-plans", json=plan_payload()).status_code == 201
+    assert client.post("/api/calibrations", json=calibration_payload()).status_code == 201
+
+    # A submitted week is immutable until the assigned Coach reopens it.
+    assert client.post("/api/calibrations", json=calibration_payload()).status_code == 409
+
+    # A Coach who is not assigned cannot reopen another Coach's participant week.
+    forbidden = client.post("/api/calibrations/demo-member/1/reopen", json={
+        "command_id": "captain-reopen", "coach_id": "captain-silas", "reason": "This must not be accepted.",
+    })
+    assert forbidden.status_code == 403
+    assert client.get("/api/dashboard/demo-member").json()["reopened_weeks"] == []
+
+    # Reopening a week with no submission is rejected.
+    assert client.post("/api/calibrations/demo-member/2/reopen", json={
+        "command_id": "reopen-missing", "coach_id": "coach-elias", "reason": "Nothing submitted for this week.",
+    }).status_code == 404
+
+    # The assigned Coach requests a revision and reopens the correct weekly record.
+    assert client.post("/api/calibrations/demo-member/1/review", json={
+        "command_id": "review-before-reopen", "coach_id": "coach-elias", "feedback": "Clarify the first strike.", "request_revision": True,
+    }).status_code == 201
+    reopened = client.post("/api/calibrations/demo-member/1/reopen", json={
+        "command_id": "reopen-week-1", "coach_id": "coach-elias", "reason": "Revise the first strike before next week.",
+    })
+    assert reopened.status_code == 201
+    assert reopened.json()["status"] == "reopened"
+
+    dashboard = client.get("/api/dashboard/demo-member").json()
+    assert dashboard["reopened_weeks"] == [1]
+    assert dashboard["current_week"] == 1
+
+    # The week cannot be reopened twice while it awaits resubmission.
+    assert client.post("/api/calibrations/demo-member/1/reopen", json={
+        "command_id": "reopen-twice", "coach_id": "coach-elias", "reason": "Reopen it again anyway.",
+    }).status_code == 409
+
+    # The participant resubmits the reopened week with revised content.
+    revised = calibration_payload() | {
+        "command_id": "read-2",
+        "aim": "Rebuild the season around the first strike.",
+        "strikes": [{"action": "Complete the budget review", "measure": "45 focused minutes on Saturday"}],
+    }
+    assert client.post("/api/calibrations", json=revised).status_code == 201
+
+    after = client.get("/api/dashboard/demo-member").json()
+    assert after["reopened_weeks"] == []
+    assert after["calibration_count"] == 2
+    assert after["latest_calibration"]["aim"] == "Rebuild the season around the first strike."
+
+    # Both submissions remain in the append-only history with the original intact.
+    submissions = [event for event in client.get("/api/events").json() if event["name"] == "WeeklyCalibrationSubmitted"]
+    assert len(submissions) == 2
+    assert submissions[0]["payload"]["aim"] == "Build a life ordered around faithful stewardship."
+    assert submissions[1]["payload"]["aim"] == "Rebuild the season around the first strike."
+
+
 def test_development_account_switcher_projection() -> None:
     client = TestClient(create_app(development_mode=True))
     accounts = client.get("/api/development/accounts").json()

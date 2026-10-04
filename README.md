@@ -68,7 +68,7 @@ Create a Crucible before enrolling members. Create all members before assignment
 
 ### Participant Review Feedback
 
-The participant Anvil shows the latest feedback from the assigned Coach. A revision request is presented separately with its next action: review the feedback and prepare the revision. The submitted week remains immutable until the assigned Coach reopens it; reopening is a separate workflow so submission history is preserved.
+The participant Anvil shows the latest feedback from the assigned Coach. A revision request is presented separately with its next action: review the feedback and prepare the revision. The submitted week remains immutable until the assigned Coach reopens it; reopening is a separate workflow so submission history is preserved. When the Coach reopens a week, the participant dashboard points at that week and announces that the earlier submission is preserved and ready to revise. In Coach review, the Coach submits feedback or a revision request, then explicitly reopens the submitted week using the same feedback as the reopen reason.
 
 ## The Why
 
@@ -404,6 +404,7 @@ Representative events:
 - `DeliberateStrikeCommitted`
 - `WeeklyCalibrationSubmitted`
 - `WeeklyCalibrationReviewed`
+- `WeeklyCalibrationReopened`
 - `ChannelMembershipGranted`
 - `NotificationPreferenceChanged`
 - `NotificationScheduled`
@@ -444,6 +445,7 @@ The local event-sourced API now supports the foundation of this milestone:
 - `POST /api/crucibles/{crucible_id}/circles` for small groups, buddy pairs, and triads, including an optional Coach sponsor.
 - `POST /api/crucibles/{crucible_id}/channels` for explicit channel membership.
 - `POST /api/season-plans`, `POST /api/calibrations`, and `POST /api/calibrations/{member_id}/{week}/review` for the participant submission and Coach review loop.
+- `POST /api/calibrations/{member_id}/{week}/reopen` for an assigned Coach to reopen a submitted week for revision. Reopening is authorized by the Coach relationship, records a `WeeklyCalibrationReopened` event, and leaves the earlier submission in the append-only history.
 - `GET /api/reference/templates` for the versioned Season Plan and weekly calibration templates, including prompt text and diagnostic scale definitions.
 - `GET /api/reference/scales` for the Momentum (Furnace) and Responsibility (Forge) scale definitions.
 - `GET /api/coaches/{coach_id}/participants/{participant_id}` for an assigned Coach's full submitted calibration record; unassigned relationships are rejected.
