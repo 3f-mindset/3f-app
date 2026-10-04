@@ -13,6 +13,7 @@ import os
 from threading import Lock
 from typing import Any, Callable
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -98,6 +99,24 @@ SEASON_WEEKS = 12
 DUE_SOON_DAYS = 3
 DUE_STATES = ("opened", "due_soon", "overdue", "submitted", "reviewed")
 
+WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+# Notification types map to a delivery category. Social alerts respect channel
+# mutes; workflow notices are required operating reminders.
+NOTIFICATION_TYPES: dict[str, dict[str, Any]] = {
+    "phase_reminder": {"category": "workflow"},
+    "season_plan": {"category": "workflow"},
+    "calibration_reminder": {"category": "workflow"},
+    "review_rhythm": {"category": "workflow"},
+    "review_workflow": {"category": "workflow"},
+    "channel_message": {"category": "social"},
+}
+NOTIFICATION_STATUSES = ("delivered", "in_app", "digest", "suppressed")
+
+
+def default_quiet_hours() -> dict[str, Any]:
+    return {"enabled": False, "days": [], "start": "22:00", "end": "07:00", "behavior": "suppress"}
+
 SEASON_PLAN_PROMPTS: dict[str, str] = {
     "season_name": "What will you call this 12-week season?",
     "current_reality": "Right now, this area is...",
@@ -156,6 +175,86 @@ def calibration_template() -> dict[str, Any]:
 
 def template_catalog() -> dict[str, Any]:
     return {"season_plan": season_plan_template(), "weekly_calibration": calibration_template()}
+
+
+def _local_time(now: datetime, timezone_name: str) -> datetime:
+    try:
+        return now.astimezone(ZoneInfo(timezone_name))
+    except Exception:
+        return now.astimezone(timezone.utc)
+
+
+def quiet_hours_until(quiet_hours: dict[str, Any], now: datetime, timezone_name: str) -> datetime | None:
+    """Return the UTC instant quiet hours end when ``now`` falls inside them.
+
+    Quiet hours are evaluated in the member's IANA timezone. A window whose end
+    is not after its start wraps past midnight, so the evening segment belongs to
+    the start day and the morning segment belongs to the previous day.
+    """
+    if not quiet_hours.get("enabled"):
+        return None
+    local = _local_time(now, timezone_name)
+    start = datetime.strptime(quiet_hours["start"], "%H:%M").time()
+    end = datetime.strptime(quiet_hours["end"], "%H:%M").time()
+    current = local.time()
+    weekdays = set(quiet_hours.get("days") or WEEKDAYS)
+    today = WEEKDAYS[local.weekday()]
+    yesterday = WEEKDAYS[(local.weekday() - 1) % 7]
+
+    def end_of(day_offset: int) -> datetime:
+        base = local + timedelta(days=day_offset)
+        return base.replace(hour=end.hour, minute=end.minute, second=0, microsecond=0).astimezone(timezone.utc)
+
+    if start <= end:
+        if start <= current < end and today in weekdays:
+            return end_of(0)
+    else:
+        if current >= start and today in weekdays:
+            return end_of(1)
+        if current < end and yesterday in weekdays:
+            return end_of(0)
+    return None
+
+
+def evaluate_notification_delivery(
+    *,
+    notification_type: str,
+    channel_id: str | None,
+    now: datetime,
+    preferences: dict[str, Any],
+    devices: dict[str, dict[str, Any]],
+    mutes: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Decide how a notification should be delivered without side effects.
+
+    Channel mutes apply only to social alerts. Opt-in quiet hours apply to every
+    type and either suppress delivery or defer it into a digest at the window's
+    end. When no device is subscribed, the notification still records in the
+    in-app center so the fallback is never lost.
+    """
+    category = NOTIFICATION_TYPES[notification_type]["category"]
+    if category == "social" and channel_id:
+        mute = mutes.get(channel_id)
+        if mute is not None:
+            until = mute.get("muted_until")
+            if until is None:
+                return {"status": "suppressed", "reason": "channel_muted", "push": False, "deliver_at": None}
+            parsed = datetime.fromisoformat(until)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            if parsed > now:
+                return {"status": "suppressed", "reason": "channel_muted", "push": False, "deliver_at": None}
+
+    quiet_hours = preferences.get("quiet_hours", default_quiet_hours())
+    quiet_until = quiet_hours_until(quiet_hours, now, preferences.get("timezone", "UTC"))
+    if quiet_until is not None:
+        if quiet_hours.get("behavior", "suppress") == "digest":
+            return {"status": "digest", "reason": "quiet_hours", "push": False, "deliver_at": quiet_until.isoformat()}
+        return {"status": "suppressed", "reason": "quiet_hours", "push": False, "deliver_at": None}
+
+    if not any(device.get("enabled") for device in devices.values()):
+        return {"status": "in_app", "reason": "no_device", "push": False, "deliver_at": None}
+    return {"status": "delivered", "reason": None, "push": True, "deliver_at": None}
 
 
 @dataclass(frozen=True)
@@ -352,6 +451,104 @@ class CreateChannelCommand(BaseModel):
         return member_ids
 
 
+def _validate_hhmm(value: str) -> str:
+    try:
+        datetime.strptime(value, "%H:%M")
+    except ValueError as error:
+        raise ValueError("Time must use the HH:MM format.") from error
+    return value
+
+
+class QuietHours(BaseModel):
+    enabled: bool = False
+    days: list[str] = Field(default_factory=list)
+    start: str = "22:00"
+    end: str = "07:00"
+    behavior: str = Field(default="suppress", pattern="^(suppress|digest)$")
+
+    @field_validator("days")
+    @classmethod
+    def unique_days(cls, days: list[str]) -> list[str]:
+        cleaned = [day.strip().lower() for day in days if day.strip()]
+        if any(day not in WEEKDAYS for day in cleaned):
+            raise ValueError("Quiet-hours days must be weekday abbreviations.")
+        if len(cleaned) != len(set(cleaned)):
+            raise ValueError("Quiet-hours days must be unique.")
+        return cleaned
+
+    @field_validator("start", "end")
+    @classmethod
+    def valid_times(cls, value: str) -> str:
+        return _validate_hhmm(value)
+
+
+class UpdateNotificationPreferencesCommand(BaseModel):
+    command_id: str = Field(default_factory=lambda: str(uuid4()))
+    timezone: str = Field(min_length=1, max_length=80)
+    quiet_hours: QuietHours = Field(default_factory=QuietHours)
+
+    @field_validator("timezone")
+    @classmethod
+    def valid_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except Exception as error:
+            raise ValueError("Timezone must be a valid IANA name.") from error
+        return value
+
+
+class SubscribeNotificationDeviceCommand(BaseModel):
+    command_id: str = Field(default_factory=lambda: str(uuid4()))
+    device_id: str = Field(min_length=3, max_length=120)
+    platform: str = Field(default="web", pattern="^(web|ios|android|desktop)$")
+    endpoint: str | None = Field(default=None, max_length=1000)
+    enabled: bool = True
+
+
+class UnsubscribeNotificationDeviceCommand(BaseModel):
+    command_id: str = Field(default_factory=lambda: str(uuid4()))
+    device_id: str = Field(min_length=3, max_length=120)
+
+
+class MuteChannelCommand(BaseModel):
+    command_id: str = Field(default_factory=lambda: str(uuid4()))
+    channel_id: str = Field(min_length=1, max_length=80)
+    muted_until: str | None = None
+
+    @field_validator("muted_until")
+    @classmethod
+    def normalized_until(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError as error:
+            raise ValueError("muted_until must be an ISO 8601 datetime.") from error
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.isoformat()
+
+
+class UnmuteChannelCommand(BaseModel):
+    command_id: str = Field(default_factory=lambda: str(uuid4()))
+    channel_id: str = Field(min_length=1, max_length=80)
+
+
+class RecordNotificationCommand(BaseModel):
+    command_id: str = Field(default_factory=lambda: str(uuid4()))
+    notification_type: str
+    title: str = Field(min_length=1, max_length=140)
+    body: str = Field(min_length=1, max_length=500)
+    channel_id: str | None = Field(default=None, min_length=1, max_length=80)
+
+    @field_validator("notification_type")
+    @classmethod
+    def known_type(cls, value: str) -> str:
+        if value not in NOTIFICATION_TYPES:
+            raise ValueError("Unknown notification type.")
+        return value
+
+
 @dataclass
 class MemberProjection:
     member_id: str
@@ -365,6 +562,10 @@ class MemberProjection:
     calibrations: list[dict[str, Any]] = field(default_factory=list)
     reviews: dict[int, dict[str, Any]] = field(default_factory=dict)
     reopened_weeks: set[int] = field(default_factory=set)
+    notification_preferences: dict[str, Any] | None = None
+    notification_devices: dict[str, dict[str, Any]] = field(default_factory=dict)
+    channel_mutes: dict[str, dict[str, Any]] = field(default_factory=dict)
+    notifications: list[dict[str, Any]] = field(default_factory=list)
 
 
 class ReadModel:
@@ -416,6 +617,21 @@ class ReadModel:
             self.member(payload["member_id"]).reviews[payload["week"]] = payload
         elif event.name == "WeeklyCalibrationReopened":
             self.member(payload["member_id"]).reopened_weeks.add(payload["week"])
+        elif event.name == "NotificationPreferenceChanged":
+            member = self.member(payload["member_id"])
+            member.notification_preferences = {"timezone": payload["timezone"], "quiet_hours": payload["quiet_hours"]}
+        elif event.name == "NotificationDeviceSubscribed":
+            self.member(payload["member_id"]).notification_devices[payload["device_id"]] = payload
+        elif event.name == "NotificationDeviceUnsubscribed":
+            self.member(payload["member_id"]).notification_devices.pop(payload["device_id"], None)
+        elif event.name == "ChannelMuteChanged":
+            mutes = self.member(payload["member_id"]).channel_mutes
+            if payload.get("muted"):
+                mutes[payload["channel_id"]] = payload
+            else:
+                mutes.pop(payload["channel_id"], None)
+        elif event.name in ("NotificationScheduled", "NotificationSuppressed"):
+            self.member(payload["member_id"]).notifications.append(payload)
 
 
 class ApplicationService:
@@ -556,7 +772,20 @@ class ApplicationService:
             "posted_at": self._clock().isoformat(),
         }
         events = self._append(f"channel:{channel_id}:messages", command.command_id, "ChannelMessagePosted", payload)
-        return {"event_ids": [event.id for event in events], "message_id": message_id, "status": "posted"}
+        notified = []
+        for recipient_id in channel["member_ids"]:
+            if recipient_id == command.author_id:
+                continue
+            decision = self._record_notification(
+                command_id=f"{command.command_id}:notify:{recipient_id}",
+                member_id=recipient_id,
+                notification_type="channel_message",
+                title=f"New message in {channel['name']}",
+                body=f"{command.author_id} posted in {channel['name']}. Open 3F to read it.",
+                channel_id=channel_id,
+            )
+            notified.append({"member_id": recipient_id, "status": decision["status"]})
+        return {"event_ids": [event.id for event in events], "message_id": message_id, "status": "posted", "notified": notified}
 
     def mark_channel_read(self, channel_id: str, command: MarkChannelReadCommand) -> dict[str, Any]:
         channel = self.channel_or_404(channel_id)
@@ -608,6 +837,161 @@ class ApplicationService:
             "message_count": len(messages),
             "read_count": read_count,
             "unread_count": max(0, len(messages) - read_count),
+        }
+
+    def _effective_notification_preferences(self, member: MemberProjection) -> dict[str, Any]:
+        if member.notification_preferences is not None:
+            return member.notification_preferences
+        plan_timezone = (member.season_plan or {}).get("timezone")
+        return {"timezone": plan_timezone or "UTC", "quiet_hours": default_quiet_hours()}
+
+    def notification_preferences(self, member_id: str) -> dict[str, Any]:
+        member = self.member_or_404(member_id)
+        preferences = self._effective_notification_preferences(member)
+        devices = sorted(member.notification_devices.values(), key=lambda device: device["subscribed_at"])
+        mutes = sorted(member.channel_mutes.values(), key=lambda mute: mute["channel_id"])
+        return {
+            "member_id": member.member_id,
+            "timezone": preferences["timezone"],
+            "quiet_hours": preferences["quiet_hours"],
+            "devices": devices,
+            "channel_mutes": mutes,
+            "push_enabled": any(device.get("enabled") for device in devices),
+            "server_time": self._clock().isoformat(),
+        }
+
+    def update_notification_preferences(self, member_id: str, command: UpdateNotificationPreferencesCommand) -> dict[str, Any]:
+        member = self.member_or_404(member_id)
+        payload = {
+            "member_id": member.member_id,
+            "timezone": command.timezone,
+            "quiet_hours": command.quiet_hours.model_dump(),
+            "changed_at": self._clock().isoformat(),
+        }
+        events = self._append(f"notification-preferences:{member.member_id}", command.command_id, "NotificationPreferenceChanged", payload)
+        return {
+            "event_ids": [event.id for event in events],
+            "member_id": member.member_id,
+            "timezone": command.timezone,
+            "quiet_hours": command.quiet_hours.model_dump(),
+            "status": "updated",
+        }
+
+    def subscribe_notification_device(self, member_id: str, command: SubscribeNotificationDeviceCommand) -> dict[str, Any]:
+        member = self.member_or_404(member_id)
+        payload = command.model_dump() | {"member_id": member.member_id, "subscribed_at": self._clock().isoformat()}
+        events = self._append(f"notification-device:{member.member_id}:{command.device_id}", command.command_id, "NotificationDeviceSubscribed", payload)
+        return {"event_ids": [event.id for event in events], "device_id": command.device_id, "status": "subscribed"}
+
+    def unsubscribe_notification_device(self, member_id: str, command: UnsubscribeNotificationDeviceCommand) -> dict[str, Any]:
+        member = self.member_or_404(member_id)
+        if command.device_id not in member.notification_devices:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device subscription not found.")
+        payload = {"member_id": member.member_id, "device_id": command.device_id, "unsubscribed_at": self._clock().isoformat()}
+        events = self._append(f"notification-device:{member.member_id}:{command.device_id}", command.command_id, "NotificationDeviceUnsubscribed", payload)
+        return {"event_ids": [event.id for event in events], "device_id": command.device_id, "status": "unsubscribed"}
+
+    def mute_channel(self, member_id: str, command: MuteChannelCommand) -> dict[str, Any]:
+        member = self.member_or_404(member_id)
+        channel = self.channel_or_404(command.channel_id)
+        self.authorize_channel_member(channel, member.member_id)
+        payload = {
+            "member_id": member.member_id,
+            "channel_id": channel["channel_id"],
+            "muted": True,
+            "muted_until": command.muted_until,
+            "changed_at": self._clock().isoformat(),
+        }
+        events = self._append(f"channel-mute:{member.member_id}:{channel['channel_id']}", command.command_id, "ChannelMuteChanged", payload)
+        return {"event_ids": [event.id for event in events], "channel_id": channel["channel_id"], "status": "muted", "muted_until": command.muted_until}
+
+    def unmute_channel(self, member_id: str, command: UnmuteChannelCommand) -> dict[str, Any]:
+        member = self.member_or_404(member_id)
+        channel = self.channel_or_404(command.channel_id)
+        self.authorize_channel_member(channel, member.member_id)
+        payload = {
+            "member_id": member.member_id,
+            "channel_id": channel["channel_id"],
+            "muted": False,
+            "muted_until": None,
+            "changed_at": self._clock().isoformat(),
+        }
+        events = self._append(f"channel-mute:{member.member_id}:{channel['channel_id']}", command.command_id, "ChannelMuteChanged", payload)
+        return {"event_ids": [event.id for event in events], "channel_id": channel["channel_id"], "status": "unmuted"}
+
+    def _record_notification(
+        self,
+        *,
+        command_id: str,
+        member_id: str,
+        notification_type: str,
+        title: str,
+        body: str,
+        channel_id: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        member = self.member_or_404(member_id)
+        if channel_id is not None:
+            channel = self.channel_or_404(channel_id)
+            self.authorize_channel_member(channel, member.member_id)
+        moment = now or self._clock()
+        preferences = self._effective_notification_preferences(member)
+        decision = evaluate_notification_delivery(
+            notification_type=notification_type,
+            channel_id=channel_id,
+            now=moment,
+            preferences=preferences,
+            devices=member.notification_devices,
+            mutes=member.channel_mutes,
+        )
+        payload = {
+            "notification_id": str(uuid4()),
+            "member_id": member.member_id,
+            "notification_type": notification_type,
+            "category": NOTIFICATION_TYPES[notification_type]["category"],
+            "title": title,
+            "body": body,
+            "channel_id": channel_id,
+            "created_at": moment.isoformat(),
+            "status": decision["status"],
+            "reason": decision["reason"],
+            "push": decision["push"],
+            "deliver_at": decision["deliver_at"],
+        }
+        event_name = "NotificationSuppressed" if decision["status"] == "suppressed" else "NotificationScheduled"
+        events = self._append(f"notification:{member.member_id}", command_id, event_name, payload)
+        return {
+            "event_ids": [event.id for event in events],
+            "notification_id": payload["notification_id"],
+            "status": decision["status"],
+            "reason": decision["reason"],
+            "push": decision["push"],
+            "deliver_at": decision["deliver_at"],
+        }
+
+    def record_notification(self, member_id: str, command: RecordNotificationCommand) -> dict[str, Any]:
+        if command.notification_type == "channel_message" and command.channel_id is None:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="A channel-message notification requires a channel_id.")
+        if command.notification_type != "channel_message" and command.channel_id is not None:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Only channel-message notifications may target a channel.")
+        return self._record_notification(
+            command_id=command.command_id,
+            member_id=member_id,
+            notification_type=command.notification_type,
+            title=command.title,
+            body=command.body,
+            channel_id=command.channel_id,
+        )
+
+    def notifications_for(self, member_id: str, include_suppressed: bool = False) -> dict[str, Any]:
+        member = self.member_or_404(member_id)
+        items = [item for item in member.notifications if include_suppressed or item["status"] != "suppressed"]
+        items = list(reversed(items))
+        return {
+            "member_id": member.member_id,
+            "notifications": items,
+            "total": len(items),
+            "push_enabled": any(device.get("enabled") for device in member.notification_devices.values()),
         }
 
     def submit_plan(self, command: SeasonPlanCommand) -> dict[str, Any]:
@@ -917,6 +1301,38 @@ def create_app(development_mode: bool | None = None, clock: Callable[[], datetim
     @app.post("/api/channels/{channel_id}/read", status_code=status.HTTP_201_CREATED)
     def mark_channel_read(channel_id: str, command: MarkChannelReadCommand) -> dict[str, Any]:
         return service.mark_channel_read(channel_id, command)
+
+    @app.get("/api/members/{member_id}/notification-preferences")
+    def notification_preferences(member_id: str) -> dict[str, Any]:
+        return service.notification_preferences(member_id)
+
+    @app.put("/api/members/{member_id}/notification-preferences")
+    def update_notification_preferences(member_id: str, command: UpdateNotificationPreferencesCommand) -> dict[str, Any]:
+        return service.update_notification_preferences(member_id, command)
+
+    @app.post("/api/members/{member_id}/notification-devices", status_code=status.HTTP_201_CREATED)
+    def subscribe_notification_device(member_id: str, command: SubscribeNotificationDeviceCommand) -> dict[str, Any]:
+        return service.subscribe_notification_device(member_id, command)
+
+    @app.post("/api/members/{member_id}/notification-devices/unsubscribe", status_code=status.HTTP_201_CREATED)
+    def unsubscribe_notification_device(member_id: str, command: UnsubscribeNotificationDeviceCommand) -> dict[str, Any]:
+        return service.unsubscribe_notification_device(member_id, command)
+
+    @app.post("/api/members/{member_id}/channel-mutes", status_code=status.HTTP_201_CREATED)
+    def mute_channel(member_id: str, command: MuteChannelCommand) -> dict[str, Any]:
+        return service.mute_channel(member_id, command)
+
+    @app.post("/api/members/{member_id}/channel-mutes/unmute", status_code=status.HTTP_201_CREATED)
+    def unmute_channel(member_id: str, command: UnmuteChannelCommand) -> dict[str, Any]:
+        return service.unmute_channel(member_id, command)
+
+    @app.get("/api/members/{member_id}/notifications")
+    def notifications(member_id: str, include_suppressed: bool = False) -> dict[str, Any]:
+        return service.notifications_for(member_id, include_suppressed)
+
+    @app.post("/api/members/{member_id}/notifications", status_code=status.HTTP_201_CREATED)
+    def record_notification(member_id: str, command: RecordNotificationCommand) -> dict[str, Any]:
+        return service.record_notification(member_id, command)
 
     @app.post("/api/season-plans", status_code=status.HTTP_201_CREATED)
     def submit_plan(command: SeasonPlanCommand) -> dict[str, Any]:

@@ -446,3 +446,221 @@ def test_seeded_channels_are_relationship_scoped() -> None:
     captain_inbox = client.get("/api/members/captain-silas/channels").json()
     assert {channel["channel_id"] for channel in captain_inbox["channels"]} == {"whole-crucible"}
     assert client.get("/api/members/captain-silas/channels/coach-direct-demo/messages").status_code == 403
+
+
+def test_notification_preferences_default_off_and_update() -> None:
+    client = TestClient(create_app())
+    prefs = client.get("/api/members/demo-member/notification-preferences").json()
+    assert prefs["member_id"] == "demo-member"
+    assert prefs["quiet_hours"] == {"enabled": False, "days": [], "start": "22:00", "end": "07:00", "behavior": "suppress"}
+    assert prefs["devices"] == []
+    assert prefs["push_enabled"] is False
+    # Without an explicit preference, the timezone falls back to UTC.
+    assert prefs["timezone"] == "UTC"
+
+    updated = client.put("/api/members/demo-member/notification-preferences", json={
+        "command_id": "prefs-1", "timezone": "America/New_York",
+        "quiet_hours": {"enabled": True, "days": ["mon", "tue"], "start": "22:00", "end": "07:00", "behavior": "digest"},
+    })
+    assert updated.status_code == 200
+    assert updated.json()["status"] == "updated"
+    after = client.get("/api/members/demo-member/notification-preferences").json()
+    assert after["timezone"] == "America/New_York"
+    assert after["quiet_hours"] == {"enabled": True, "days": ["mon", "tue"], "start": "22:00", "end": "07:00", "behavior": "digest"}
+    assert "NotificationPreferenceChanged" in [event["name"] for event in client.get("/api/events").json()]
+
+    # Preference changes are validated rather than silently accepted.
+    assert client.put("/api/members/demo-member/notification-preferences", json={
+        "command_id": "prefs-bad-tz", "timezone": "Mars/Olympus", "quiet_hours": {"enabled": False},
+    }).status_code == 422
+    assert client.put("/api/members/demo-member/notification-preferences", json={
+        "command_id": "prefs-bad-hour", "timezone": "UTC", "quiet_hours": {"enabled": True, "start": "25:00", "end": "07:00"},
+    }).status_code == 422
+    assert client.get("/api/members/unknown/notification-preferences").status_code == 404
+
+
+def test_device_subscription_controls_push_versus_in_app_fallback() -> None:
+    client = TestClient(create_app())
+    body = {"notification_type": "calibration_reminder", "title": "Week 1 is open", "body": "Complete your read."}
+
+    # With no subscribed device, the notification still records for in-app fallback.
+    first = client.post("/api/members/demo-member/notifications", json=body | {"command_id": "n1"})
+    assert first.status_code == 201
+    assert first.json()["status"] == "in_app"
+    assert first.json()["push"] is False
+
+    assert client.post("/api/members/demo-member/notification-devices", json={
+        "command_id": "d1", "device_id": "phone-1", "platform": "ios",
+    }).status_code == 201
+    assert client.get("/api/members/demo-member/notification-preferences").json()["push_enabled"] is True
+
+    delivered = client.post("/api/members/demo-member/notifications", json=body | {"command_id": "n2"})
+    assert delivered.json()["status"] == "delivered"
+    assert delivered.json()["push"] is True
+
+    # Unsubscribing a device returns the member to the in-app fallback.
+    assert client.post("/api/members/demo-member/notification-devices/unsubscribe", json={
+        "command_id": "d2", "device_id": "phone-1",
+    }).status_code == 201
+    assert client.post("/api/members/demo-member/notification-devices/unsubscribe", json={
+        "command_id": "d3", "device_id": "phone-1",
+    }).status_code == 404
+    third = client.post("/api/members/demo-member/notifications", json=body | {"command_id": "n3"})
+    assert third.json()["status"] == "in_app"
+
+    center = client.get("/api/members/demo-member/notifications").json()
+    assert center["total"] == 3
+    assert [item["status"] for item in center["notifications"]] == ["in_app", "delivered", "in_app"]
+
+
+def test_quiet_hours_are_evaluated_in_the_member_timezone() -> None:
+    def client_at(iso: str) -> TestClient:
+        return TestClient(create_app(clock=lambda: datetime.fromisoformat(iso).replace(tzinfo=timezone.utc)))
+
+    # 2026-07-08T02:00Z is 2026-07-07 22:00 in America/New_York (a Tuesday).
+    client = client_at("2026-07-08T02:00:00")
+    assert client.post("/api/members/demo-member/notification-devices", json={"command_id": "d1", "device_id": "phone-1"}).status_code == 201
+    assert client.put("/api/members/demo-member/notification-preferences", json={
+        "command_id": "p1", "timezone": "America/New_York",
+        "quiet_hours": {"enabled": True, "days": ["tue"], "start": "21:00", "end": "07:00", "behavior": "suppress"},
+    }).status_code == 200
+    suppressed = client.post("/api/members/demo-member/notifications", json={
+        "command_id": "n1", "notification_type": "calibration_reminder", "title": "Week open", "body": "Read.",
+    })
+    assert suppressed.json()["status"] == "suppressed"
+    assert suppressed.json()["reason"] == "quiet_hours"
+
+    # 2026-07-08T08:00Z is 04:00 in America/New_York, still inside the quiet
+    # window, but it is 08:00 UTC, outside the same window for a UTC member.
+    client = client_at("2026-07-08T08:00:00")
+    assert client.put("/api/members/demo-member/notification-preferences", json={
+        "command_id": "p1b", "timezone": "America/New_York",
+        "quiet_hours": {"enabled": True, "days": ["tue"], "start": "21:00", "end": "07:00", "behavior": "suppress"},
+    }).status_code == 200
+    assert client.post("/api/members/demo-member/notifications", json={
+        "command_id": "n1b", "notification_type": "calibration_reminder", "title": "Week open", "body": "Read.",
+    }).json()["status"] == "suppressed"
+
+    # The same instant is outside quiet hours when the member is on UTC, so the
+    # policy is timezone-aware rather than server-local.
+    utc_client = client_at("2026-07-08T08:00:00")
+    assert utc_client.put("/api/members/demo-member/notification-preferences", json={
+        "command_id": "p2", "timezone": "UTC",
+        "quiet_hours": {"enabled": True, "days": ["tue"], "start": "21:00", "end": "07:00", "behavior": "suppress"},
+    }).status_code == 200
+    open_now = utc_client.post("/api/members/demo-member/notifications", json={
+        "command_id": "n2", "notification_type": "calibration_reminder", "title": "Week open", "body": "Read.",
+    })
+    assert open_now.json()["status"] == "in_app"
+
+
+def test_quiet_hours_digest_defers_to_the_window_end() -> None:
+    client = TestClient(create_app(clock=lambda: datetime.fromisoformat("2026-07-08T02:00:00").replace(tzinfo=timezone.utc)))
+    assert client.put("/api/members/demo-member/notification-preferences", json={
+        "command_id": "p1", "timezone": "America/New_York",
+        "quiet_hours": {"enabled": True, "days": [], "start": "21:00", "end": "07:00", "behavior": "digest"},
+    }).status_code == 200
+    digest = client.post("/api/members/demo-member/notifications", json={
+        "command_id": "n1", "notification_type": "review_rhythm", "title": "Weekly review", "body": "Prepare your read.",
+    })
+    assert digest.json()["status"] == "digest"
+    assert digest.json()["reason"] == "quiet_hours"
+    # 07:00 America/New_York (EDT) on 2026-07-08 is 11:00 UTC.
+    assert digest.json()["deliver_at"] == "2026-07-08T11:00:00+00:00"
+
+
+def test_channel_mutes_suppress_social_alerts_without_silencing_workflow() -> None:
+    client = build_alpha_channel_client()
+    assert client.post("/api/members/student-dee/notification-devices", json={"command_id": "d1", "device_id": "phone-1"}).status_code == 201
+    assert client.post("/api/members/student-dee/channel-mutes", json={"command_id": "m1", "channel_id": "buddy-channel"}).status_code == 201
+
+    social = client.post("/api/members/student-dee/notifications", json={
+        "command_id": "n1", "notification_type": "channel_message", "title": "New message", "body": "Open 3F.", "channel_id": "buddy-channel",
+    })
+    assert social.json()["status"] == "suppressed"
+    assert social.json()["reason"] == "channel_muted"
+
+    # Channel mutes apply only to social alerts, never required workflow notices.
+    workflow = client.post("/api/members/student-dee/notifications", json={
+        "command_id": "n2", "notification_type": "calibration_reminder", "title": "Week open", "body": "Read.",
+    })
+    assert workflow.json()["status"] == "delivered"
+
+    # Suppressed alerts stay in the audit trail but are hidden from the center.
+    assert client.get("/api/members/student-dee/notifications").json()["total"] == 1
+    assert client.get("/api/members/student-dee/notifications?include_suppressed=true").json()["total"] == 2
+
+    assert client.post("/api/members/student-dee/channel-mutes/unmute", json={"command_id": "m2", "channel_id": "buddy-channel"}).status_code == 201
+    restored = client.post("/api/members/student-dee/notifications", json={
+        "command_id": "n3", "notification_type": "channel_message", "title": "New message", "body": "Open 3F.", "channel_id": "buddy-channel",
+    })
+    assert restored.json()["status"] == "delivered"
+
+
+def test_channel_mute_until_expires() -> None:
+    client = TestClient(create_app(clock=lambda: datetime.fromisoformat("2026-07-08T12:00:00").replace(tzinfo=timezone.utc)))
+    assert client.post("/api/members/demo-member/notification-devices", json={"command_id": "d1", "device_id": "phone-1"}).status_code == 201
+
+    # A mute whose window already passed does not suppress new alerts.
+    assert client.post("/api/members/demo-member/channel-mutes", json={
+        "command_id": "m1", "channel_id": "whole-crucible", "muted_until": "2026-07-08T11:00:00Z",
+    }).status_code == 201
+    open_now = client.post("/api/members/demo-member/notifications", json={
+        "command_id": "n1", "notification_type": "channel_message", "title": "t", "body": "b", "channel_id": "whole-crucible",
+    })
+    assert open_now.json()["status"] == "delivered"
+
+    # A future mute suppresses until its expiry.
+    assert client.post("/api/members/demo-member/channel-mutes", json={
+        "command_id": "m2", "channel_id": "whole-crucible", "muted_until": "2026-07-08T13:00:00Z",
+    }).status_code == 201
+    muted = client.post("/api/members/demo-member/notifications", json={
+        "command_id": "n2", "notification_type": "channel_message", "title": "t", "body": "b", "channel_id": "whole-crucible",
+    })
+    assert muted.json()["status"] == "suppressed"
+
+
+def test_notification_authorization_boundaries() -> None:
+    client = build_alpha_channel_client()
+
+    # Only a channel member can mute it or receive its social alerts.
+    assert client.post("/api/members/captain-ada/channel-mutes", json={"command_id": "m1", "channel_id": "buddy-channel"}).status_code == 403
+    assert client.post("/api/members/captain-ada/notifications", json={
+        "command_id": "n1", "notification_type": "channel_message", "title": "t", "body": "b", "channel_id": "buddy-channel",
+    }).status_code == 403
+
+    # A channel-message notification must name a channel; a workflow notice must not.
+    assert client.post("/api/members/student-cai/notifications", json={
+        "command_id": "n2", "notification_type": "channel_message", "title": "t", "body": "b",
+    }).status_code == 422
+    assert client.post("/api/members/student-cai/notifications", json={
+        "command_id": "n3", "notification_type": "calibration_reminder", "title": "t", "body": "b", "channel_id": "buddy-channel",
+    }).status_code == 422
+
+
+def test_message_post_generates_generic_social_notifications_idempotently() -> None:
+    client = build_alpha_channel_client()
+    posted = client.post("/api/channels/buddy-channel/messages", json={
+        "command_id": "msg-1", "author_id": "student-cai", "body": "Morning, ready for the week?",
+    })
+    assert posted.status_code == 201
+    notified = {item["member_id"]: item["status"] for item in posted.json()["notified"]}
+    assert notified == {"student-dee": "in_app", "coach-ben": "in_app"}
+
+    # Replaying the command does not duplicate the message or its notifications.
+    assert client.post("/api/channels/buddy-channel/messages", json={
+        "command_id": "msg-1", "author_id": "student-cai", "body": "Morning, ready for the week?",
+    }).status_code == 201
+    event_names = [event["name"] for event in client.get("/api/events").json()]
+    assert event_names.count("ChannelMessagePosted") == 1
+    assert event_names.count("NotificationScheduled") == 2
+
+    # The recipient's push payload stays generic and never leaks message content.
+    notification = client.get("/api/members/student-dee/notifications").json()["notifications"][0]
+    assert notification["notification_type"] == "channel_message"
+    assert notification["category"] == "social"
+    assert notification["body"] == "student-cai posted in Cai and Dee. Open 3F to read it."
+    assert "Morning" not in notification["body"]
+
+    # The author is never notified of his own message.
+    assert client.get("/api/members/student-cai/notifications").json()["total"] == 0

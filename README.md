@@ -458,6 +458,10 @@ The local event-sourced API now supports the foundation of this milestone:
 - `GET /api/members/{member_id}/channels/{channel_id}/messages` for authorized thread history; channel membership is required.
 - `POST /api/channels/{channel_id}/messages` to persist a channel message as a `ChannelMessagePosted` event.
 - `POST /api/channels/{channel_id}/read` to advance the member's `ChannelRead` position and clear their unread count.
+- `GET` and `PUT /api/members/{member_id}/notification-preferences` for the member's timezone, quiet hours, device subscriptions, and channel mutes.
+- `POST /api/members/{member_id}/notification-devices` and `/notification-devices/unsubscribe` to opt a device in or out of push.
+- `POST /api/members/{member_id}/channel-mutes` and `/channel-mutes/unmute` to mute or restore a channel's social alerts, permanently or until a chosen time.
+- `POST /api/members/{member_id}/notifications` to evaluate and record a notification, and `GET /api/members/{member_id}/notifications` for the in-app notification center.
 
 The POC validates that buddy pairs have two members, triads have three, Coach sponsors are Coaches in the same Crucible, circle channels match their circle membership, participant-private channels exclude Coaches and Captains, and Captain visibility is limited to assigned Coach status without participant calibration content.
 
@@ -488,6 +492,17 @@ Text channels are explicit, membership-scoped conversations. A member can only l
 Messages are durable `ChannelMessagePosted` events on the channel's append-only stream. `GET /api/members/{member_id}/channels` returns each authorized channel with its unread count and a last-message preview; `GET /api/members/{member_id}/channels/{channel_id}/messages` returns the ordered thread. A member's own posts never count against their unread state, and `POST /api/channels/{channel_id}/read` records a `ChannelRead` event that advances that member's read position to the current message count.
 
 In the PWA, the **Channels** screen lists the active member's authorized channels with unread badges, opens a thread, and sends messages. Sends go through the same durable outbox as every other command, so a message composed offline is queued with its client-generated ID and synchronizes exactly once on reconnection.
+
+### Notification Preferences
+
+Notifications are evaluated server-side against the member's explicit preferences before anything is pushed. The policy is deterministic and side-effect free, so it is covered by domain tests.
+
+- **Device subscriptions are opt-in.** A member subscribes one or more devices through `POST /api/members/{member_id}/notification-devices`. With no subscribed device, a notification still records in the in-app center (`status: in_app`) instead of being lost, so push is a channel and never a guarantee.
+- **Quiet hours are off by default.** When a member opts in, they choose the days, start and end time, and whether the window **suppresses** delivery or defers it into a **digest** delivered when the window ends. Times are evaluated in the member's IANA timezone through `ZoneInfo`, and windows wrapping past midnight are handled correctly.
+- **Channel mutes apply to social alerts only.** `POST /api/members/{member_id}/channel-mutes` mutes a channel permanently or `muted_until` a chosen time. Mutes never silence required season-plan, calibration, or review-workflow notices, which are projected as the `workflow` category against the `social` message category.
+- **Push payloads stay generic.** A channel message produces a notification such as `"student-cai posted in Cai and Dee. Open 3F to read it."`, never the message body, so a locked device does not expose private coaching content.
+
+Each decision is durable: `NotificationPreferenceChanged`, `NotificationDeviceSubscribed`, `NotificationDeviceUnsubscribed`, `ChannelMuteChanged`, `NotificationScheduled`, and `NotificationSuppressed` events are appended to the member's streams. Posting a channel message generates one idempotent notification per other channel member, keyed by the message's command ID, so replaying an offline send never duplicates an alert. The PWA exposes a **Notifications** screen for device opt-in, quiet-hours and timezone editing, channel mutes, and the in-app notification center, where suppressed alerts stay available for audit but are hidden by default.
 
 ### Milestone 2: Season Design Journey
 

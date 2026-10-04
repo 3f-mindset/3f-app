@@ -34,6 +34,15 @@ type ChannelSummary = { channel_id: string; name: string; kind: string; member_c
 type ChannelInbox = { member_id: string; channels: ChannelSummary[]; unread_total: number };
 type ChannelMessage = { channel_id: string; message_id: string; author_id: string; body: string; posted_at: string };
 type ChannelThread = { channel: { channel_id: string; name: string; kind: string; member_ids: string[] }; messages: ChannelMessage[]; message_count: number; read_count: number; unread_count: number };
+type QuietHours = { enabled: boolean; days: string[]; start: string; end: string; behavior: "suppress" | "digest" };
+type NotificationDevice = { device_id: string; platform: string; enabled: boolean; subscribed_at: string };
+type ChannelMute = { channel_id: string; muted: boolean; muted_until: string | null; changed_at: string };
+type NotificationPreferences = { member_id: string; timezone: string; quiet_hours: QuietHours; devices: NotificationDevice[]; channel_mutes: ChannelMute[]; push_enabled: boolean; server_time: string };
+type NotificationRecord = {
+  notification_id: string; notification_type: string; category: string; title: string; body: string; channel_id: string | null;
+  created_at: string; status: "delivered" | "in_app" | "digest" | "suppressed"; reason: string | null; push: boolean; deliver_at: string | null;
+};
+type NotificationCenter = { member_id: string; notifications: NotificationRecord[]; total: number; push_enabled: boolean };
 type OutboxItem = { id: string; endpoint: string; body: unknown; label?: string; queuedAt?: string; status?: "pending" | "rejected"; error?: string; statusCode?: number | null };
 type DeckStep = { section: string; prompt: string; hint?: string; content: ReactNode };
 
@@ -76,6 +85,8 @@ const split = (text: string) => text.split(",").map((item) => item.trim()).filte
 const commandId = () => crypto.randomUUID();
 
 const OUTBOX_KEY = "threef-outbox";
+const NOTIFICATION_DEVICE_KEY = "threef-notification-device";
+const WEEKDAY_OPTIONS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
 const loadOutbox = (): OutboxItem[] => JSON.parse(localStorage.getItem(OUTBOX_KEY) ?? "[]") as OutboxItem[];
 const saveOutbox = (items: OutboxItem[]) => localStorage.setItem(OUTBOX_KEY, JSON.stringify(items));
 const describeCommand = (endpoint: string): string => {
@@ -296,6 +307,131 @@ function OutboxStatus({ items, online, onRetry, onRetryAll, onDiscard }: {
   </section>;
 }
 
+function Notifications({ memberId, online, onNotice, onCountChange }: {
+  memberId: string; online: boolean; onNotice: (message: string) => void; onCountChange: (count: number) => void;
+}) {
+  const [preferences, setPreferences] = useState<NotificationPreferences | null>(null);
+  const [center, setCenter] = useState<NotificationCenter | null>(null);
+  const [channels, setChannels] = useState<ChannelSummary[]>([]);
+  const [timezone, setTimezone] = useState("UTC");
+  const [quiet, setQuiet] = useState<QuietHours>({ enabled: false, days: [], start: "22:00", end: "07:00", behavior: "suppress" });
+  const [muteUntil, setMuteUntil] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+
+  const load = async () => {
+    try {
+      const [prefResponse, centerResponse, channelResponse] = await Promise.all([
+        fetch(`${API}/api/members/${memberId}/notification-preferences`),
+        fetch(`${API}/api/members/${memberId}/notifications`),
+        fetch(`${API}/api/members/${memberId}/channels`),
+      ]);
+      if (prefResponse.ok) {
+        const data = await prefResponse.json() as NotificationPreferences;
+        setPreferences(data); setTimezone(data.timezone); setQuiet(data.quiet_hours);
+      }
+      if (centerResponse.ok) {
+        const data = await centerResponse.json() as NotificationCenter;
+        setCenter(data); onCountChange(data.total);
+      }
+      if (channelResponse.ok) setChannels((await channelResponse.json() as ChannelInbox).channels);
+    } catch { onNotice("Notification settings are unavailable while offline."); }
+  };
+  useEffect(() => { void load(); }, [memberId]);
+
+  const run = async (endpoint: string, body: Record<string, unknown>, success: string, method = "POST") => {
+    setBusy(true);
+    try {
+      const id = commandId();
+      const response = await fetch(`${API}${endpoint}`, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ command_id: id, ...body }) });
+      if (!response.ok) {
+        let detail = "The server rejected this command.";
+        try { detail = (await response.json()).detail ?? detail; } catch { /* keep fallback detail */ }
+        throw new Error(detail);
+      }
+      onNotice(success); await load();
+    } catch (error) { onNotice(error instanceof Error ? error.message : "Action could not be completed."); }
+    finally { setBusy(false); }
+  };
+
+  const deviceId = () => {
+    const existing = localStorage.getItem(NOTIFICATION_DEVICE_KEY);
+    if (existing) return existing;
+    const created = crypto.randomUUID();
+    localStorage.setItem(NOTIFICATION_DEVICE_KEY, created);
+    return created;
+  };
+  const enablePush = async () => {
+    if (!online) { onNotice("Reconnect to enable push on this device."); return; }
+    if ("Notification" in window) {
+      const permission = await Notification.requestPermission();
+      if (permission === "denied") { onNotice("Push permission is blocked for this browser."); return; }
+    }
+    await run(`/api/members/${memberId}/notification-devices`, { device_id: deviceId(), platform: "web" }, "Push is now enabled on this device.");
+  };
+  const disablePush = async () => {
+    const target = preferences?.devices.find((device) => device.device_id === localStorage.getItem(NOTIFICATION_DEVICE_KEY)) ?? preferences?.devices[0];
+    if (!target) { onNotice("No device subscription is registered."); return; }
+    await run(`/api/members/${memberId}/notification-devices/unsubscribe`, { device_id: target.device_id }, "This device will no longer receive push.");
+  };
+  const savePreferences = async () => { await run(`/api/members/${memberId}/notification-preferences`, { timezone, quiet_hours: quiet }, "Notification preferences saved.", "PUT"); };
+  const toggleDay = (day: string) => setQuiet({ ...quiet, days: quiet.days.includes(day) ? quiet.days.filter((item) => item !== day) : [...quiet.days, day] });
+  const mute = (channelId: string) => {
+    const until = muteUntil[channelId] ? new Date(muteUntil[channelId]).toISOString() : null;
+    void run(`/api/members/${memberId}/channel-mutes`, { channel_id: channelId, muted_until: until }, "Channel muted. Required notices still deliver.");
+  };
+  const unmute = (channelId: string) => void run(`/api/members/${memberId}/channel-mutes/unmute`, { channel_id: channelId }, "Channel alerts restored.");
+
+  const mutedChannels = new Set((preferences?.channel_mutes ?? []).map((mute) => mute.channel_id));
+  const statusLabels: Record<NotificationRecord["status"], string> = { delivered: "Pushed", in_app: "In-app", digest: "Digest", suppressed: "Suppressed" };
+  return <section className="notifications">
+    <p className="eyebrow">Notifications</p>
+    <h1>Reminders that respect your boundaries.</h1>
+    <p className="lead">Push is opt-in per device. Delivery is evaluated in your timezone, quiet hours stay off until you enable them, and channel mutes never silence required calibration or review notices.</p>
+
+    <div className="notification-card">
+      <div className="notification-head"><strong>Push on this device</strong><span>{preferences?.push_enabled ? "Enabled" : "Off"}</span></div>
+      <p>{preferences?.push_enabled ? "This device can receive generic push reminders." : "No push is sent until you subscribe a device. In-app notifications still record."}</p>
+      {preferences?.push_enabled
+        ? <button className="back" disabled={busy} onClick={() => void disablePush()}>Disable on this device</button>
+        : <button className="primary" disabled={busy} onClick={() => void enablePush()}>Enable push on this device</button>}
+      {preferences && preferences.devices.length > 0 && <ul className="device-list">{preferences.devices.map((device) => <li key={device.device_id}><span>{device.platform} · {device.device_id.slice(0, 8)}</span><small>{device.enabled ? "subscribed" : "disabled"}</small></li>)}</ul>}
+    </div>
+
+    <div className="notification-card">
+      <div className="notification-head"><strong>Quiet hours</strong><label className="switch"><input type="checkbox" checked={quiet.enabled} onChange={() => setQuiet({ ...quiet, enabled: !quiet.enabled })} /> {quiet.enabled ? "On" : "Off"}</label></div>
+      <p>Evaluated in <b>{timezone}</b>. Off by default; when enabled, choose suppression or a digest delivered when the window ends. Windows that wrap past midnight are supported.</p>
+      <div className="quiet-grid">
+        <label>Timezone<input value={timezone} onChange={(event) => setTimezone(event.target.value)} placeholder="America/New_York" /></label>
+        <label>Start<input type="time" value={quiet.start} onChange={(event) => setQuiet({ ...quiet, start: event.target.value })} /></label>
+        <label>End<input type="time" value={quiet.end} onChange={(event) => setQuiet({ ...quiet, end: event.target.value })} /></label>
+        <label>Behavior<select value={quiet.behavior} onChange={(event) => setQuiet({ ...quiet, behavior: event.target.value as QuietHours["behavior"] })}><option value="suppress">Suppress</option><option value="digest">Digest at end</option></select></label>
+      </div>
+      <div className="day-picker">{WEEKDAY_OPTIONS.map((day) => <button type="button" key={day} className={quiet.days.includes(day) ? "selected" : ""} aria-pressed={quiet.days.includes(day)} onClick={() => toggleDay(day)}>{day}</button>)}</div>
+      <button className="primary" disabled={busy} onClick={() => void savePreferences()}>Save preferences</button>
+    </div>
+
+    <div className="notification-card">
+      <div className="notification-head"><strong>Channel mutes</strong><span>{mutedChannels.size} muted</span></div>
+      <p>Mutes apply to social message alerts only. Required season plan, calibration, and review notices always deliver.</p>
+      {channels.length === 0 ? <p>You are not a member of any channel yet.</p> : <ul className="mute-list">{channels.map((channel) => <li key={channel.channel_id}>
+        <div><strong>{channel.name}</strong><small>{channel.kind.replaceAll("_", " ")}</small></div>
+        {mutedChannels.has(channel.channel_id)
+          ? <button className="back" disabled={busy} onClick={() => unmute(channel.channel_id)}>Unmute</button>
+          : <div className="mute-controls"><input type="datetime-local" value={muteUntil[channel.channel_id] ?? ""} onChange={(event) => setMuteUntil({ ...muteUntil, [channel.channel_id]: event.target.value })} /><button className="back" disabled={busy} onClick={() => mute(channel.channel_id)}>{muteUntil[channel.channel_id] ? "Mute until" : "Mute"}</button></div>}
+      </li>)}</ul>}
+    </div>
+
+    <div className="notification-card">
+      <div className="notification-head"><strong>In-app center</strong><span>{center?.total ?? 0}</span></div>
+      {!center ? <p>Loading notifications...</p> : center.notifications.length === 0 ? <p>No notifications yet. Reminders and message alerts appear here.</p> : <ul className="notification-list">{center.notifications.map((item) => <li key={item.notification_id}>
+        <div><strong>{item.title}</strong><span className={`notif-status ${item.status}`}>{statusLabels[item.status]}</span></div>
+        <p>{item.body}</p>
+        <small>{new Date(item.created_at).toLocaleString()}{item.deliver_at ? ` · digest ${new Date(item.deliver_at).toLocaleString()}` : ""}{item.reason ? ` · ${item.reason.replaceAll("_", " ")}` : ""}</small>
+      </li>)}</ul>}
+    </div>
+  </section>;
+}
+
 function AdministratorSetup({ onNotice, onAccountsChanged }: { onNotice: (message: string) => void; onAccountsChanged: () => void }) {
   const [crucibleId, setCrucibleId] = useState("pilot-crucible");
   const [crucible, setCrucible] = useState({ name: "Pilot Crucible", review_week_start: "2026-09-01", refinement_week_start: "2026-09-08", launch_date: "2026-09-15" });
@@ -327,7 +463,7 @@ function AdministratorSetup({ onNotice, onAccountsChanged }: { onNotice: (messag
 }
 
 function App() {
-  const [screen, setScreen] = useState<"anvil" | "plan" | "calibration" | "coach-review" | "administrator-setup" | "channels" | "outbox">("anvil");
+  const [screen, setScreen] = useState<"anvil" | "plan" | "calibration" | "coach-review" | "administrator-setup" | "channels" | "outbox" | "notifications">("anvil");
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [coachRecords, setCoachRecords] = useState<Dashboard[]>([]);
   const [captainRecords, setCaptainRecords] = useState<CaptainCoachStatus[]>([]);
@@ -346,6 +482,7 @@ function App() {
   const [channelInbox, setChannelInbox] = useState<ChannelInbox | null>(null);
   const [activeChannel, setActiveChannel] = useState<ChannelThread | null>(null);
   const [messageDraft, setMessageDraft] = useState("");
+  const [notificationCount, setNotificationCount] = useState(0);
 
   const refresh = () => fetch(`${API}/api/dashboard/${activeMemberId}`).then((response) => response.json()).then(setDashboard).catch(() => setNotice("Working offline. Your drafts are safe on this device."));
   useEffect(() => {
@@ -377,6 +514,12 @@ function App() {
   useEffect(() => {
     setActiveChannel(null);
     void loadChannelInbox();
+  }, [activeMemberId]);
+  useEffect(() => {
+    fetch(`${API}/api/members/${activeMemberId}/notifications`)
+      .then((response) => response.ok ? response.json() : null)
+      .then((data) => setNotificationCount((data as NotificationCenter | null)?.total ?? 0))
+      .catch(() => setNotificationCount(0));
   }, [activeMemberId]);
 
   const updatePlan = (key: string, value: string) => { const next = { ...plan, [key]: value }; setPlan(next); localStorage.setItem("threef-plan-draft", JSON.stringify(next)); };
@@ -516,7 +659,7 @@ function App() {
   return <main>
     <header><div className="brand"><span className="mark">3F</span><div><strong>Clean Burn</strong><small>Read. Tell the truth. Strike.</small></div></div><div className={`connection ${online ? "online" : "offline"}`}>{online ? "Online" : "Offline"}</div></header>
     {DEVELOPMENT_MODE && accounts.length > 0 && <label className="account-switcher"><span>Development account</span><select value={activeMemberId} onChange={(event) => switchAccount(event.target.value)}>{accounts.map((account) => <option value={account.member_id} key={account.member_id}>{account.name} · {account.role}</option>)}</select></label>}
-    <nav><button className={screen === "anvil" ? "active" : ""} onClick={() => setScreen("anvil")}>Anvil</button>{isParticipant && <button className={screen === "plan" ? "active" : ""} onClick={() => setScreen("plan")}>Season Plan</button>}{isParticipant && <button className={screen === "calibration" ? "active" : ""} onClick={() => setScreen("calibration")}>Weekly Calibration</button>}{dashboard?.role === "coach" && <button className={screen === "coach-review" ? "active" : ""} onClick={() => setScreen("coach-review")}>Coach review</button>}<button className={screen === "channels" ? "active" : ""} onClick={() => { setActiveChannel(null); setScreen("channels"); void loadChannelInbox(); }}>Channels{channelInbox && channelInbox.unread_total > 0 ? ` · ${channelInbox.unread_total}` : ""}</button>{DEVELOPMENT_MODE && dashboard?.role === "administrator" && <button className={screen === "administrator-setup" ? "active" : ""} onClick={() => setScreen("administrator-setup")}>Setup</button>}<button className={screen === "outbox" ? "active" : ""} onClick={() => setScreen("outbox")}>Outbox{outbox.length > 0 ? ` · ${outbox.length}` : ""}</button></nav>
+    <nav><button className={screen === "anvil" ? "active" : ""} onClick={() => setScreen("anvil")}>Anvil</button>{isParticipant && <button className={screen === "plan" ? "active" : ""} onClick={() => setScreen("plan")}>Season Plan</button>}{isParticipant && <button className={screen === "calibration" ? "active" : ""} onClick={() => setScreen("calibration")}>Weekly Calibration</button>}{dashboard?.role === "coach" && <button className={screen === "coach-review" ? "active" : ""} onClick={() => setScreen("coach-review")}>Coach review</button>}<button className={screen === "channels" ? "active" : ""} onClick={() => { setActiveChannel(null); setScreen("channels"); void loadChannelInbox(); }}>Channels{channelInbox && channelInbox.unread_total > 0 ? ` · ${channelInbox.unread_total}` : ""}</button><button className={screen === "notifications" ? "active" : ""} onClick={() => setScreen("notifications")}>Notifications{notificationCount > 0 ? ` · ${notificationCount}` : ""}</button>{DEVELOPMENT_MODE && dashboard?.role === "administrator" && <button className={screen === "administrator-setup" ? "active" : ""} onClick={() => setScreen("administrator-setup")}>Setup</button>}<button className={screen === "outbox" ? "active" : ""} onClick={() => setScreen("outbox")}>Outbox{outbox.length > 0 ? ` · ${outbox.length}` : ""}</button></nav>
     {notice && <aside className="notice">{notice}</aside>}
     {screen === "anvil" && isParticipant && dashboard?.latest_review && <ParticipantReview review={dashboard.latest_review} reopened={Boolean(dashboard?.latest_calibration && dashboard.reopened_weeks?.includes(dashboard.latest_calibration.week))} />}
     {screen === "anvil" && isParticipant && dashboard?.weekly_due && <WeeklyDueState due={dashboard.weekly_due} />}
@@ -528,6 +671,7 @@ function App() {
     {DEVELOPMENT_MODE && screen === "administrator-setup" && dashboard?.role === "administrator" && <AdministratorSetup onNotice={setNotice} onAccountsChanged={refreshAccounts} />}
     {screen === "channels" && <Channels inbox={channelInbox} thread={activeChannel} memberId={activeMemberId} draft={messageDraft} onDraftChange={setMessageDraft} onOpen={(channelId) => void openChannel(channelId)} onBack={() => { setActiveChannel(null); void loadChannelInbox(); }} onSend={() => void sendChannelMessage()} />}
     {screen === "outbox" && <OutboxStatus items={outbox} online={online} onRetry={retryOutboxItem} onRetryAll={retryAllOutbox} onDiscard={discardOutboxItem} />}
+    {screen === "notifications" && <Notifications memberId={activeMemberId} online={online} onNotice={setNotice} onCountChange={setNotificationCount} />}
   </main>;
 }
 
