@@ -444,10 +444,18 @@ The local event-sourced API now supports the foundation of this milestone:
 - `POST /api/crucibles/{crucible_id}/circles` for small groups, buddy pairs, and triads, including an optional Coach sponsor.
 - `POST /api/crucibles/{crucible_id}/channels` for explicit channel membership.
 - `POST /api/season-plans`, `POST /api/calibrations`, and `POST /api/calibrations/{member_id}/{week}/review` for the participant submission and Coach review loop.
+- `GET /api/reference/templates` for the versioned Season Plan and weekly calibration templates, including prompt text and diagnostic scale definitions.
+- `GET /api/reference/scales` for the Momentum (Furnace) and Responsibility (Forge) scale definitions.
 - `GET /api/coaches/{coach_id}/participants/{participant_id}` for an assigned Coach's full submitted calibration record; unassigned relationships are rejected.
 - `GET /api/captains/{captain_id}/coaches/{coach_id}/status` for an assigned Captain's Coach completion and review-state projection. It returns roster names, plan/submission/review state, and aggregate counts only, never participant calibration or feedback content.
 
 The POC validates that buddy pairs have two members, triads have three, Coach sponsors are Coaches in the same Crucible, circle channels match their circle membership, participant-private channels exclude Coaches and Captains, and Captain visibility is limited to assigned Coach status without participant calibration content.
+
+Every Season Plan and weekly calibration submission stores a snapshot of the exact template version, prompts, and scale definitions used at submit time. Changing a template in a later release introduces a new version and does not rewrite the historical context of earlier submissions.
+
+### Versioned Templates
+
+Season Plan and weekly calibration templates are versioned by `TEMPLATE_VERSION`. A submission embeds its template snapshot in the `SeasonPlanSubmitted` or `WeeklyCalibrationSubmitted` event, so a Coach reviewing old work sees the exact prompts and scale definitions the participant answered. The reference catalog is available at `GET /api/reference/templates`.
 
 In the PWA, a Coach selects **Coach review** in the Anvil, opens an assigned participant's submitted calibration, sees each of the six 3F sections, then sends participant-visible feedback or requests a revision. The review is stored as a `WeeklyCalibrationReviewed` event.
 

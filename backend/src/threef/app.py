@@ -92,6 +92,68 @@ RESPONSIBILITY_DEFINITIONS: dict[ResponsibilityLevel, tuple[int, str, str]] = {
 }
 
 
+TEMPLATE_VERSION = "1"
+
+SEASON_PLAN_PROMPTS: dict[str, str] = {
+    "season_name": "What will you call this 12-week season?",
+    "current_reality": "Right now, this area is...",
+    "outcome": "By the end of this 12-week season, I will have...",
+    "protected_time": "What protected time will hold this work?",
+    "action": "What action will happen inside that container?",
+    "boundary": "What boundary protects the container?",
+    "evidence": "What evidence shows the container is working?",
+    "weekly_actions": "Each week, I will...",
+    "scoreboard_measure": "How will this be scored green, yellow, or red?",
+    "eliminations": "What commitment must be paused, delegated, finished, dropped, or reduced?",
+    "review_rhythm": "When is the repeated weekly review day, time, and timezone?",
+}
+
+CALIBRATION_PROMPTS: dict[str, str] = {
+    "aim": "What direction are you choosing to hold?",
+    "momentum_evidence": "What specifically created that level this week?",
+    "meaningful_moment": "What moment carried weight?",
+    "why_it_mattered": "Why did it matter?",
+    "value_in_focus": "Which value was most in focus this week?",
+    "value_most_neglected": "Which value was most neglected this week?",
+    "role_reads": "What actually happened that justifies this rating?",
+    "avoided": "What did you avoid?",
+    "drain": "What drained you more than it should have?",
+    "unreleased_weight": "What are you still carrying that has not been released?",
+    "role_to_forge": "Which role will you deliberately strengthen next?",
+    "strikes": "What are your focused, measurable strikes for the next week?",
+}
+
+
+def scale_definitions() -> dict[str, list[dict[str, Any]]]:
+    return {
+        "momentum": [
+            {"value": key.value, "level": value[0], "label": value[1], "definition": value[2]}
+            for key, value in MOMENTUM_DEFINITIONS.items()
+        ],
+        "responsibility": [
+            {"value": key.value, "level": value[0], "label": value[1], "definition": value[2]}
+            for key, value in RESPONSIBILITY_DEFINITIONS.items()
+        ],
+    }
+
+
+def season_plan_template() -> dict[str, Any]:
+    return {"template_id": "season_plan", "version": TEMPLATE_VERSION, "prompts": dict(SEASON_PLAN_PROMPTS)}
+
+
+def calibration_template() -> dict[str, Any]:
+    return {
+        "template_id": "weekly_calibration",
+        "version": TEMPLATE_VERSION,
+        "prompts": dict(CALIBRATION_PROMPTS),
+        "scales": scale_definitions(),
+    }
+
+
+def template_catalog() -> dict[str, Any]:
+    return {"season_plan": season_plan_template(), "weekly_calibration": calibration_template()}
+
+
 @dataclass(frozen=True)
 class DomainEvent:
     id: str
@@ -427,6 +489,7 @@ class ApplicationService:
         payload = command.model_dump()
         payload["status"] = "submitted"
         payload["submitted_at"] = datetime.now(timezone.utc).isoformat()
+        payload["template"] = season_plan_template()
         events = self._append(f"season-plan:{command.member_id}", command.command_id, "SeasonPlanSubmitted", payload)
         return {"event_ids": [event.id for event in events], "status": "submitted"}
 
@@ -446,6 +509,7 @@ class ApplicationService:
         payload = command.model_dump()
         payload["status"] = "submitted"
         payload["submitted_at"] = datetime.now(timezone.utc).isoformat()
+        payload["template"] = calibration_template()
         events = self._append(f"calibration:{command.member_id}:{command.week}", command.command_id, "WeeklyCalibrationSubmitted", payload)
         return {"event_ids": [event.id for event in events], "status": "submitted"}
 
@@ -580,10 +644,11 @@ def create_app(development_mode: bool | None = None) -> FastAPI:
 
     @app.get("/api/reference/scales")
     def scales() -> dict[str, Any]:
-        return {
-            "momentum": [{"value": key.value, "level": value[0], "label": value[1], "definition": value[2]} for key, value in MOMENTUM_DEFINITIONS.items()],
-            "responsibility": [{"value": key.value, "level": value[0], "label": value[1], "definition": value[2]} for key, value in RESPONSIBILITY_DEFINITIONS.items()],
-        }
+        return scale_definitions()
+
+    @app.get("/api/reference/templates")
+    def templates() -> dict[str, Any]:
+        return template_catalog()
 
     @app.get("/api/dashboard/{member_id}")
     def dashboard(member_id: str) -> dict[str, Any]:

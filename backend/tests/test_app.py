@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 
-from threef.app import create_app
+from threef.app import TEMPLATE_VERSION, create_app
 
 
 def plan_payload() -> dict:
@@ -48,6 +48,41 @@ def calibration_payload() -> dict:
         "strikes": [{"action": "Complete the budget review", "measure": "30 focused minutes on Saturday"}],
         "scoreboard": {"Health": "green"},
     }
+
+
+def test_submissions_persist_versioned_template_snapshots() -> None:
+    client = TestClient(create_app())
+    assert client.post("/api/season-plans", json=plan_payload()).status_code == 201
+    assert client.post("/api/calibrations", json=calibration_payload()).status_code == 201
+
+    events = client.get("/api/events").json()
+    plan_event = next(event for event in events if event["name"] == "SeasonPlanSubmitted")
+    plan_template = plan_event["payload"]["template"]
+    assert plan_template["template_id"] == "season_plan"
+    assert plan_template["version"] == TEMPLATE_VERSION
+    assert "season_name" in plan_template["prompts"]
+    assert "outcome" in plan_template["prompts"]
+
+    calibration_event = next(event for event in events if event["name"] == "WeeklyCalibrationSubmitted")
+    calibration_template = calibration_event["payload"]["template"]
+    assert calibration_template["template_id"] == "weekly_calibration"
+    assert calibration_template["version"] == TEMPLATE_VERSION
+    assert "momentum_evidence" in calibration_template["prompts"]
+    assert [item["label"] for item in calibration_template["scales"]["momentum"]][:2] == ["Clogged", "Toxic"]
+    assert [item["label"] for item in calibration_template["scales"]["responsibility"]][-1] == "Unbreakable"
+
+    # The exact template used is retained on the projection for the submission.
+    latest_calibration = client.get("/api/dashboard/demo-member").json()["latest_calibration"]
+    assert latest_calibration["template"] == calibration_template
+
+
+def test_reference_template_catalog() -> None:
+    client = TestClient(create_app())
+    catalog = client.get("/api/reference/templates").json()
+    assert set(catalog) == {"season_plan", "weekly_calibration"}
+    assert catalog["season_plan"]["version"] == TEMPLATE_VERSION
+    assert catalog["weekly_calibration"]["version"] == TEMPLATE_VERSION
+    assert catalog["weekly_calibration"]["scales"] == client.get("/api/reference/scales").json()
 
 
 def test_pilot_flow_and_idempotency() -> None:
