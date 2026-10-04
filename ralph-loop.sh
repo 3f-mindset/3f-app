@@ -62,11 +62,11 @@ This is Ralph iteration ${iteration} of ${MAX_ITERATIONS}. Work in ${ROOT}. Begi
     printf 'warning: no origin remote configured; skipping push.\n' >&2
   fi
 
-  if grep -q "RALPH_COMPLETE" "$log_file"; then
+  if grep -qE '^[[:space:]]*RALPH_COMPLETE[[:space:]]*$' "$log_file"; then
     printf 'Ralph reports the prioritized backlog is complete.\n'
     exit 0
   fi
-  if grep -q "RALPH_BLOCKED:" "$log_file"; then
+  if grep -qE '^[[:space:]]*RALPH_BLOCKED:' "$log_file"; then
     printf 'Ralph reported a blocker. See %s\n' "$log_file" >&2
     exit 2
   fi
