@@ -450,10 +450,23 @@ The local event-sourced API now supports the foundation of this milestone:
 - `GET /api/reference/scales` for the Momentum (Furnace) and Responsibility (Forge) scale definitions.
 - `GET /api/coaches/{coach_id}/participants/{participant_id}` for an assigned Coach's full submitted calibration record; unassigned relationships are rejected.
 - `GET /api/captains/{captain_id}/coaches/{coach_id}/status` for an assigned Captain's Coach completion and review-state projection. It returns roster names, plan/submission/review state, and aggregate counts only, never participant calibration or feedback content.
+- `GET /api/participants/{member_id}/weekly-due-state` for the participant's per-week operating state, also embedded as `weekly_due` in `GET /api/dashboard/{member_id}`.
 
 The POC validates that buddy pairs have two members, triads have three, Coach sponsors are Coaches in the same Crucible, circle channels match their circle membership, participant-private channels exclude Coaches and Captains, and Captain visibility is limited to assigned Coach status without participant calibration content.
 
 Every Season Plan and weekly calibration submission stores a snapshot of the exact template version, prompts, and scale definitions used at submit time. Changing a template in a later release introduces a new version and does not rewrite the historical context of earlier submissions.
+
+### Weekly Due-State Projection
+
+`GET /api/participants/{member_id}/weekly-due-state` projects each opened week of the 12-week season as one of five operating states:
+
+- **opened**: the week is open and not yet due soon.
+- **due_soon**: the week's deadline falls within three days.
+- **overdue**: the deadline passed without a submission.
+- **submitted**: a calibration is recorded and awaits Coach review.
+- **reviewed**: the assigned Coach has reviewed the submission.
+
+A Coach reopening a week returns it to the participant's action queue (`opened`, `due_soon`, or `overdue`) and flags `reopened: true` while the earlier submission stays in the append-only history. Week deadlines derive from the Crucible `launch_date`, so a Crucible configures its own schedule rather than hard-coding dates. The participant Anvil renders this projection as a weekly schedule with the current due state.
 
 ### Versioned Templates
 

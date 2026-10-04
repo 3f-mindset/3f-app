@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from fastapi.testclient import TestClient
 
 from threef.app import TEMPLATE_VERSION, create_app
@@ -251,6 +253,62 @@ def test_captain_can_only_view_assigned_coach_status_without_calibration_content
     }).status_code == 201
     assert client.get("/api/captains/captain-judah/coaches/coach-elias/status").status_code == 403
     assert client.get("/api/captains/captain-silas/coaches/demo-member/status").status_code == 403
+
+
+def test_weekly_due_state_projection_lifecycle() -> None:
+    def client_on(day: str) -> TestClient:
+        return TestClient(create_app(clock=lambda: datetime.fromisoformat(day).replace(tzinfo=timezone.utc)))
+
+    # The seeded Crucible launches on 2026-07-07, so Week 1 is open with a 2026-07-14 due date.
+    opened = client_on("2026-07-08").get("/api/participants/demo-member/weekly-due-state").json()
+    assert opened["member_id"] == "demo-member"
+    assert opened["current_week"] == 1
+    assert opened["weeks"] == [{
+        "week": 1, "opens_on": "2026-07-07", "due_on": "2026-07-14",
+        "state": "opened", "submitted": False, "reviewed": False, "reopened": False,
+    }]
+    assert opened["counts"] == {"opened": 1, "due_soon": 0, "overdue": 0, "submitted": 0, "reviewed": 0}
+
+    due_soon = client_on("2026-07-12").get("/api/participants/demo-member/weekly-due-state").json()
+    assert due_soon["weeks"][0]["state"] == "due_soon"
+
+    overdue = client_on("2026-07-20").get("/api/participants/demo-member/weekly-due-state").json()
+    assert overdue["current_week"] == 2
+    assert [item["state"] for item in overdue["weeks"]] == ["overdue", "due_soon"]
+    assert overdue["counts"]["overdue"] == 1
+
+    client = client_on("2026-07-08")
+    assert client.post("/api/season-plans", json=plan_payload()).status_code == 201
+    assert client.post("/api/calibrations", json=calibration_payload()).status_code == 201
+    submitted = client.get("/api/participants/demo-member/weekly-due-state").json()
+    assert submitted["weeks"][0]["state"] == "submitted"
+    assert submitted["weeks"][0]["submitted"] is True
+    assert submitted["counts"]["submitted"] == 1
+
+    assert client.post("/api/calibrations/demo-member/1/review", json={
+        "command_id": "due-review", "coach_id": "coach-elias", "feedback": "Clear and honest.",
+    }).status_code == 201
+    reviewed = client.get("/api/participants/demo-member/weekly-due-state").json()
+    assert reviewed["weeks"][0]["state"] == "reviewed"
+    assert reviewed["weeks"][0]["reviewed"] is True
+    assert reviewed["counts"]["reviewed"] == 1
+
+    # Reopening returns the week to the participant's action queue while preserving history.
+    assert client.post("/api/calibrations/demo-member/1/reopen", json={
+        "command_id": "due-reopen", "coach_id": "coach-elias", "reason": "Clarify the first strike.",
+    }).status_code == 201
+    reopened = client.get("/api/participants/demo-member/weekly-due-state").json()
+    assert reopened["weeks"][0] == {
+        "week": 1, "opens_on": "2026-07-07", "due_on": "2026-07-14",
+        "state": "opened", "submitted": False, "reviewed": False, "reopened": True,
+    }
+
+
+def test_weekly_due_state_is_participant_only() -> None:
+    client = TestClient(create_app())
+    assert client.get("/api/participants/coach-elias/weekly-due-state").status_code == 422
+    dashboard = client.get("/api/dashboard/coach-elias").json()
+    assert dashboard["weekly_due"] is None
 
 
 def test_crucible_relationships_and_channel_boundaries() -> None:

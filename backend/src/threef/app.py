@@ -7,7 +7,7 @@ interfaces are the seam where DynamoDB, EventBridge, and Lambda adapters fit.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 import os
 from threading import Lock
@@ -93,6 +93,10 @@ RESPONSIBILITY_DEFINITIONS: dict[ResponsibilityLevel, tuple[int, str, str]] = {
 
 
 TEMPLATE_VERSION = "1"
+
+SEASON_WEEKS = 12
+DUE_SOON_DAYS = 3
+DUE_STATES = ("opened", "due_soon", "overdue", "submitted", "reviewed")
 
 SEASON_PLAN_PROMPTS: dict[str, str] = {
     "season_name": "What will you call this 12-week season?",
@@ -392,9 +396,10 @@ class ReadModel:
 
 
 class ApplicationService:
-    def __init__(self, event_store: EventStore, read_model: ReadModel) -> None:
+    def __init__(self, event_store: EventStore, read_model: ReadModel, clock: Callable[[], datetime] | None = None) -> None:
         self.event_store = event_store
         self.read_model = read_model
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     def _append(self, stream_id: str, command_id: str, name: str, payload: dict[str, Any]) -> list[DomainEvent]:
         version = sum(event.stream_id == stream_id for event in self.event_store.all())
@@ -555,6 +560,54 @@ class ApplicationService:
         events = self._append(f"reopen:{member_id}:{week}", command.command_id, "WeeklyCalibrationReopened", payload)
         return {"event_ids": [event.id for event in events], "status": "reopened"}
 
+    def weekly_due_states(self, member_id: str) -> dict[str, Any]:
+        member = self.member_or_404(member_id)
+        if member.role != ProgramRole.PARTICIPANT:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Weekly due-state is defined for participants.")
+        crucible = self.crucible_or_404(member.crucible_id)
+        launch = date.fromisoformat(crucible["launch_date"])
+        now = self._clock()
+        today = now.date()
+        elapsed_days = (today - launch).days
+        current_week = min(max(elapsed_days // 7 + 1, 0), SEASON_WEEKS) if elapsed_days >= 0 else 0
+        submitted_weeks = {item["week"] for item in member.calibrations}
+        tracked_weeks = submitted_weeks | set(member.reviews) | member.reopened_weeks
+        last_week = min(max([current_week, *tracked_weeks]) if (current_week or tracked_weeks) else 0, SEASON_WEEKS)
+        weeks: list[dict[str, Any]] = []
+        for week in range(1, last_week + 1):
+            opens_on = launch + timedelta(days=7 * (week - 1))
+            due_on = launch + timedelta(days=7 * week)
+            reopened = week in member.reopened_weeks
+            reviewed = week in member.reviews and not reopened
+            submitted = week in submitted_weeks and not reopened
+            if reviewed:
+                state = "reviewed"
+            elif submitted:
+                state = "submitted"
+            elif today > due_on:
+                state = "overdue"
+            elif (due_on - today).days <= DUE_SOON_DAYS:
+                state = "due_soon"
+            else:
+                state = "opened"
+            weeks.append({
+                "week": week,
+                "opens_on": opens_on.isoformat(),
+                "due_on": due_on.isoformat(),
+                "state": state,
+                "submitted": submitted,
+                "reviewed": reviewed,
+                "reopened": reopened,
+            })
+        counts = {state: sum(item["state"] == state for item in weeks) for state in DUE_STATES}
+        return {
+            "member_id": member.member_id,
+            "generated_at": now.isoformat(),
+            "current_week": current_week,
+            "weeks": weeks,
+            "counts": counts,
+        }
+
     def dashboard(self, member_id: str) -> dict[str, Any]:
         member = self.member_or_404(member_id)
         latest = member.calibrations[-1] if member.calibrations else None
@@ -582,6 +635,7 @@ class ApplicationService:
             "current_week": current_week,
             "calibration_count": len(member.calibrations),
             "reopened_weeks": reopened_weeks,
+            "weekly_due": self.weekly_due_states(member_id) if member.role == ProgramRole.PARTICIPANT else None,
             "direct_reports": direct_reports,
         }
 
@@ -664,10 +718,10 @@ class ApplicationService:
         return {"crucible": crucible, "members": members, "circles": circles, "channels": channels}
 
 
-def create_app(development_mode: bool | None = None) -> FastAPI:
+def create_app(development_mode: bool | None = None, clock: Callable[[], datetime] | None = None) -> FastAPI:
     app = FastAPI(title="3F API", version="0.1.0")
     app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
-    service = ApplicationService(EventStore(), ReadModel())
+    service = ApplicationService(EventStore(), ReadModel(), clock=clock)
     service.seed()
     app.state.service = service
     app.state.development_mode = development_mode if development_mode is not None else os.getenv("THREEF_DEVELOPMENT_MODE", "true").lower() == "true"
@@ -687,6 +741,10 @@ def create_app(development_mode: bool | None = None) -> FastAPI:
     @app.get("/api/dashboard/{member_id}")
     def dashboard(member_id: str) -> dict[str, Any]:
         return service.dashboard(member_id)
+
+    @app.get("/api/participants/{member_id}/weekly-due-state")
+    def weekly_due_state(member_id: str) -> dict[str, Any]:
+        return service.weekly_due_states(member_id)
 
     @app.get("/api/development/accounts")
     def development_accounts() -> list[dict[str, str]]:
