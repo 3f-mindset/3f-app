@@ -313,6 +313,7 @@ Required follow-up for every role: **What actually happened that justifies this 
 - Write user commands locally first through a durable outbox with client-generated IDs, expected stream versions, retries, and idempotency.
 - Synchronize queued commands and authorized projections on reconnection.
 - Show clear states: local draft, synchronizing, synchronized, or needs attention.
+- Expose an Outbox screen that lists every queued command with its state (waiting for connection, synchronizing, or needs attention), offers per-command and whole-outbox retry, and lets a confirmed conflict be discarded.
 - Preserve conflicts rather than silently overwriting them. Formal submissions are immutable unless a Coach reopens them.
 - Queue offline messages and show sending, sent, or needs-attention status.
 - Clear local data on logout; do not put sensitive information in URLs, unauthenticated caches, or push payloads.

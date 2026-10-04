@@ -110,6 +110,22 @@ def test_calibration_requires_plan() -> None:
     assert response.status_code == 409
 
 
+def test_rejected_queued_command_reports_conflict_detail() -> None:
+    client = TestClient(create_app())
+    assert client.post("/api/season-plans", json=plan_payload()).status_code == 201
+    assert client.post("/api/calibrations", json=calibration_payload()).status_code == 201
+
+    # A queued duplicate for an already-submitted week is rejected with the detail
+    # the offline outbox surfaces as a needs-attention conflict state.
+    conflict = client.post("/api/calibrations", json=calibration_payload() | {"command_id": "read-queued-retry"})
+    assert conflict.status_code == 409
+    assert "already submitted" in conflict.json()["detail"]
+
+    # Replaying the original command ID remains idempotent and never duplicates state.
+    assert client.post("/api/calibrations", json=calibration_payload()).status_code == 201
+    assert client.get("/api/dashboard/demo-member").json()["calibration_count"] == 1
+
+
 def test_only_assigned_coach_can_review_calibration() -> None:
     client = TestClient(create_app())
     assert client.post("/api/season-plans", json=plan_payload()).status_code == 201
@@ -144,8 +160,10 @@ def test_assigned_coach_reopens_week_and_preserves_submission_history() -> None:
     assert client.post("/api/season-plans", json=plan_payload()).status_code == 201
     assert client.post("/api/calibrations", json=calibration_payload()).status_code == 201
 
-    # A submitted week is immutable until the assigned Coach reopens it.
-    assert client.post("/api/calibrations", json=calibration_payload()).status_code == 409
+    # A submitted week is immutable until the assigned Coach reopens it. A new
+    # command for the same week conflicts, while replaying the original command
+    # is idempotent (see test_rejected_queued_command_reports_conflict_detail).
+    assert client.post("/api/calibrations", json=calibration_payload() | {"command_id": "read-1-resubmit"}).status_code == 409
 
     # A Coach who is not assigned cannot reopen another Coach's participant week.
     forbidden = client.post("/api/calibrations/demo-member/1/reopen", json={

@@ -201,6 +201,9 @@ class EventStore:
     def all(self) -> list[DomainEvent]:
         return list(self._events)
 
+    def events_for_command(self, command_id: str) -> list[DomainEvent]:
+        return list(self._command_events.get(command_id, []))
+
 
 class SeasonDomain(BaseModel):
     name: str = Field(min_length=2, max_length=60)
@@ -509,6 +512,9 @@ class ApplicationService:
         return {"event_ids": [event.id for event in events], "status": "submitted"}
 
     def submit_calibration(self, command: CalibrationCommand) -> dict[str, Any]:
+        replayed = self.event_store.events_for_command(command.command_id)
+        if replayed:
+            return {"event_ids": [event.id for event in replayed], "status": "submitted"}
         member = self.member_or_404(command.member_id)
         if member.season_plan is None:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A Season Plan must be submitted before a weekly calibration.")

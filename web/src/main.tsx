@@ -30,7 +30,7 @@ type CaptainCoachStatus = {
   participants: { member_id: string; name: string; season_plan_status: string; calibration: { week: number; review_status: "awaiting_review" | "reviewed" | "revision_requested" } | null }[];
 };
 type ScaleItem = { value: string; level: number; label: string; definition: string };
-type OutboxItem = { id: string; endpoint: string; body: unknown };
+type OutboxItem = { id: string; endpoint: string; body: unknown; label?: string; queuedAt?: string; status?: "pending" | "rejected"; error?: string; statusCode?: number | null };
 type DeckStep = { section: string; prompt: string; hint?: string; content: ReactNode };
 
 const defaultPlan = {
@@ -70,12 +70,62 @@ const VALUE_OPTIONS = [
 
 const split = (text: string) => text.split(",").map((item) => item.trim()).filter(Boolean);
 const commandId = () => crypto.randomUUID();
-const loadOutbox = (): OutboxItem[] => JSON.parse(localStorage.getItem("threef-outbox") ?? "[]") as OutboxItem[];
-const queue = (item: OutboxItem) => localStorage.setItem("threef-outbox", JSON.stringify([...loadOutbox(), item]));
+
+const OUTBOX_KEY = "threef-outbox";
+const loadOutbox = (): OutboxItem[] => JSON.parse(localStorage.getItem(OUTBOX_KEY) ?? "[]") as OutboxItem[];
+const saveOutbox = (items: OutboxItem[]) => localStorage.setItem(OUTBOX_KEY, JSON.stringify(items));
+const describeCommand = (endpoint: string): string => {
+  if (endpoint.includes("/season-plans")) return "Season Plan";
+  if (endpoint.includes("/review")) return "Coach review";
+  if (endpoint.includes("/reopen")) return "Revision request";
+  if (endpoint.includes("/calibrations")) return "Weekly Calibration";
+  if (endpoint.includes("/coach-assignments") || endpoint.includes("/captain-assignments")) return "Assignment";
+  if (endpoint.includes("/members")) return "Enroll member";
+  if (endpoint.includes("/circles")) return "Circle";
+  if (endpoint.includes("/channels")) return "Channel";
+  if (endpoint.includes("/crucibles")) return "Crucible";
+  return "Command";
+};
+const queue = (item: OutboxItem) => saveOutbox([...loadOutbox(), { label: describeCommand(item.endpoint), queuedAt: new Date().toISOString(), status: "pending", ...item }]);
+
+class SyncError extends Error {
+  status: number | null;
+  constructor(message: string, status: number | null) {
+    super(message);
+    this.status = status;
+  }
+}
 
 async function send(item: OutboxItem) {
-  const response = await fetch(`${API}${item.endpoint}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(item.body) });
-  if (!response.ok) throw new Error((await response.json()).detail ?? "Unable to synchronize");
+  let response: Response;
+  try {
+    response = await fetch(`${API}${item.endpoint}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(item.body) });
+  } catch {
+    throw new SyncError("No connection to the server.", null);
+  }
+  if (!response.ok) {
+    let detail = "The server rejected this command.";
+    try { detail = (await response.json()).detail ?? detail; } catch { /* keep fallback detail */ }
+    throw new SyncError(detail, response.status);
+  }
+}
+
+async function syncOutbox(): Promise<OutboxItem[]> {
+  const remaining: OutboxItem[] = [];
+  for (const item of loadOutbox()) {
+    if (item.status === "rejected") { remaining.push(item); continue; }
+    try {
+      await send(item);
+    } catch (error) {
+      if (error instanceof SyncError && error.status !== null) {
+        remaining.push({ ...item, status: "rejected", error: error.message, statusCode: error.status });
+      } else {
+        remaining.push({ ...item, status: "pending", error: undefined, statusCode: null });
+      }
+    }
+  }
+  saveOutbox(remaining);
+  return remaining;
 }
 
 function Field({ value, onChange, multiline = false, placeholder }: { value: string; onChange: (value: string) => void; multiline?: boolean; placeholder?: string }) {
@@ -183,6 +233,34 @@ function CaptainVisibility({ records }: { records: CaptainCoachStatus[] }) {
   return <section className="record-list"><p className="eyebrow">Coach visibility</p>{records.map((record) => <article key={record.coach.member_id}><div><strong>{record.coach.name}</strong><span>{record.summary.participant_count} participant{record.summary.participant_count === 1 ? "" : "s"}</span></div><dl><div><dt>Plans</dt><dd>{record.summary.plans_submitted} / {record.summary.participant_count}</dd></div><div><dt>Submitted</dt><dd>{record.summary.calibrations_submitted} / {record.summary.participant_count}</dd></div><div><dt>Reviewed</dt><dd>{record.summary.calibrations_reviewed} / {record.summary.calibrations_submitted}</dd></div></dl>{record.participants.map((participant) => <p key={participant.member_id}><b>{participant.name}</b> · {participant.calibration ? `Week ${participant.calibration.week} · ${participant.calibration.review_status.replace("_", " ")}` : "No calibration submitted"}</p>)}</article>)}</section>;
 }
 
+function OutboxStatus({ items, online, onRetry, onRetryAll, onDiscard }: {
+  items: OutboxItem[]; online: boolean;
+  onRetry: (item: OutboxItem) => void; onRetryAll: () => void; onDiscard: (item: OutboxItem) => void;
+}) {
+  const pending = items.filter((item) => item.status !== "rejected");
+  const rejected = items.filter((item) => item.status === "rejected");
+  if (items.length === 0) return <section className="outbox"><p className="eyebrow">Outbox</p><h1>Everything is synchronized.</h1><p className="lead">Commands you submit offline wait here until a connection returns, then synchronize exactly once.</p></section>;
+  return <section className="outbox">
+    <p className="eyebrow">Outbox · {items.length} waiting</p>
+    <h1>{rejected.length > 0 ? "Some commands need attention." : online ? "Synchronizing queued commands." : "Queued while offline."}</h1>
+    <p className="lead">Each command carries its own ID, so replaying it never duplicates state. Rejected commands stay here until you retry or discard them.</p>
+    {rejected.length > 0 && <div className="outbox-list">
+      {rejected.map((item) => <article className="outbox-item conflict" key={item.id}>
+        <div><strong>{item.label ?? describeCommand(item.endpoint)}</strong><span>Needs attention{item.statusCode ? ` · HTTP ${item.statusCode}` : ""}</span></div>
+        <p>{item.error ?? "The server rejected this command."}</p>
+        <div className="outbox-actions"><button className="back" onClick={() => onRetry(item)}>Retry</button><button className="back danger" onClick={() => onDiscard(item)}>Discard</button></div>
+      </article>)}
+    </div>}
+    {pending.length > 0 && <div className="outbox-list">
+      {pending.map((item) => <article className="outbox-item" key={item.id}>
+        <div><strong>{item.label ?? describeCommand(item.endpoint)}</strong><span>{online ? "Synchronizing" : "Waiting for connection"}</span></div>
+        <small>{item.queuedAt ? `Queued ${new Date(item.queuedAt).toLocaleString()}` : "Queued on this device"}</small>
+      </article>)}
+    </div>}
+    {items.length > 0 && <button className="primary" disabled={!online} onClick={onRetryAll}>{online ? "Retry synchronization" : "Reconnect to retry"}</button>}
+  </section>;
+}
+
 function AdministratorSetup({ onNotice, onAccountsChanged }: { onNotice: (message: string) => void; onAccountsChanged: () => void }) {
   const [crucibleId, setCrucibleId] = useState("pilot-crucible");
   const [crucible, setCrucible] = useState({ name: "Pilot Crucible", review_week_start: "2026-09-01", refinement_week_start: "2026-09-08", launch_date: "2026-09-15" });
@@ -214,7 +292,7 @@ function AdministratorSetup({ onNotice, onAccountsChanged }: { onNotice: (messag
 }
 
 function App() {
-  const [screen, setScreen] = useState<"anvil" | "plan" | "calibration" | "coach-review" | "administrator-setup">("anvil");
+  const [screen, setScreen] = useState<"anvil" | "plan" | "calibration" | "coach-review" | "administrator-setup" | "outbox">("anvil");
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [coachRecords, setCoachRecords] = useState<Dashboard[]>([]);
   const [captainRecords, setCaptainRecords] = useState<CaptainCoachStatus[]>([]);
@@ -226,6 +304,7 @@ function App() {
   const [read, setRead] = useState(() => ({ ...defaultRead, ...JSON.parse(localStorage.getItem("threef-read-draft") ?? "{}") }));
   const [notice, setNotice] = useState("");
   const [online, setOnline] = useState(navigator.onLine);
+  const [outbox, setOutbox] = useState<OutboxItem[]>(() => loadOutbox());
   const [reviewParticipant, setReviewParticipant] = useState<Dashboard | null>(null);
   const [feedback, setFeedback] = useState("");
   const [requestRevision, setRequestRevision] = useState(false);
@@ -237,15 +316,12 @@ function App() {
     fetch(`${API}/api/reference/scales`).then((response) => response.json()).then((data) => { setMomentum(data.momentum); setResponsibility(data.responsibility); }).catch(() => undefined);
     const reconnect = () => {
       setOnline(true);
-      void (async () => {
-        const remaining: OutboxItem[] = [];
-        for (const item of loadOutbox()) { try { await send(item); } catch { remaining.push(item); } }
-        localStorage.setItem("threef-outbox", JSON.stringify(remaining)); refresh();
-      })();
+      void syncOutbox().then((remaining) => { setOutbox(remaining); refresh(); }).catch(() => undefined);
     };
     const disconnect = () => setOnline(false);
     window.addEventListener("online", reconnect); window.addEventListener("offline", disconnect);
     if ("serviceWorker" in navigator) void navigator.serviceWorker.register("/sw.js");
+    if (navigator.onLine) void syncOutbox().then(setOutbox).catch(() => undefined);
     return () => { window.removeEventListener("online", reconnect); window.removeEventListener("offline", disconnect); };
   }, [activeMemberId]);
   useEffect(() => {
@@ -264,7 +340,34 @@ function App() {
   const updatePlan = (key: string, value: string) => { const next = { ...plan, [key]: value }; setPlan(next); localStorage.setItem("threef-plan-draft", JSON.stringify(next)); };
   const updateRead = (key: string, value: string) => { const next = { ...read, [key]: value }; setRead(next); localStorage.setItem("threef-read-draft", JSON.stringify(next)); };
   const deliver = async (item: OutboxItem, success: string, destination: "anvil" | "plan" | "calibration") => {
-    try { await send(item); setNotice(success); refresh(); setScreen(destination); } catch { queue(item); setNotice("Saved offline. It will synchronize when you reconnect."); setScreen(destination); }
+    try {
+      await send(item); setNotice(success); refresh();
+    } catch (error) {
+      if (error instanceof SyncError && error.status !== null) {
+        queue({ ...item, status: "rejected", error: error.message, statusCode: error.status });
+        setNotice(`This command needs attention: ${error.message}`);
+      } else {
+        queue(item);
+        setNotice("Saved offline. It will synchronize when you reconnect.");
+      }
+      setOutbox(loadOutbox());
+    }
+    setScreen(destination);
+  };
+  const retryOutboxItem = (item: OutboxItem) => {
+    saveOutbox(loadOutbox().map((entry) => entry.id === item.id ? { ...entry, status: "pending", error: undefined, statusCode: null } : entry));
+    setOutbox(loadOutbox());
+    void syncOutbox().then((remaining) => { setOutbox(remaining); if (remaining.length === 0) { setNotice("Queued commands synchronized."); refresh(); } else setNotice("Some commands still need attention."); }).catch(() => setNotice("Retry failed. Check your connection and try again."));
+  };
+  const retryAllOutbox = () => {
+    saveOutbox(loadOutbox().map((entry) => ({ ...entry, status: "pending", error: undefined, statusCode: null })));
+    setOutbox(loadOutbox());
+    void syncOutbox().then((remaining) => { setOutbox(remaining); if (remaining.length === 0) { setNotice("Queued commands synchronized."); refresh(); } else setNotice("Some commands still need attention."); }).catch(() => setNotice("Retry failed. Check your connection and try again."));
+  };
+  const discardOutboxItem = (item: OutboxItem) => {
+    saveOutbox(loadOutbox().filter((entry) => entry.id !== item.id));
+    setOutbox(loadOutbox());
+    setNotice("Command discarded from the outbox. Nothing was sent.");
   };
   const submitPlan = () => {
     const body = { command_id: commandId(), member_id: activeMemberId, season_name: plan.season_name, review_day: plan.review_day, review_time: plan.review_time, timezone: plan.timezone, roles: split(plan.roles), values: split(plan.values), domains: [{ name: plan.domain, current_reality: plan.current_reality, outcome: plan.outcome, protected_time: plan.protected_time, action: plan.action, boundary: plan.boundary, evidence: plan.evidence, weekly_actions: split(plan.weekly_actions), scoreboard_measure: plan.scoreboard_measure }], eliminations: [{ action: plan.elimination_action, commitment: plan.elimination }] };
@@ -333,7 +436,7 @@ function App() {
   return <main>
     <header><div className="brand"><span className="mark">3F</span><div><strong>Clean Burn</strong><small>Read. Tell the truth. Strike.</small></div></div><div className={`connection ${online ? "online" : "offline"}`}>{online ? "Online" : "Offline"}</div></header>
     {DEVELOPMENT_MODE && accounts.length > 0 && <label className="account-switcher"><span>Development account</span><select value={activeMemberId} onChange={(event) => switchAccount(event.target.value)}>{accounts.map((account) => <option value={account.member_id} key={account.member_id}>{account.name} · {account.role}</option>)}</select></label>}
-    <nav><button className={screen === "anvil" ? "active" : ""} onClick={() => setScreen("anvil")}>Anvil</button>{isParticipant && <button className={screen === "plan" ? "active" : ""} onClick={() => setScreen("plan")}>Season Plan</button>}{isParticipant && <button className={screen === "calibration" ? "active" : ""} onClick={() => setScreen("calibration")}>Weekly Calibration</button>}{dashboard?.role === "coach" && <button className={screen === "coach-review" ? "active" : ""} onClick={() => setScreen("coach-review")}>Coach review</button>}{DEVELOPMENT_MODE && dashboard?.role === "administrator" && <button className={screen === "administrator-setup" ? "active" : ""} onClick={() => setScreen("administrator-setup")}>Setup</button>}</nav>
+    <nav><button className={screen === "anvil" ? "active" : ""} onClick={() => setScreen("anvil")}>Anvil</button>{isParticipant && <button className={screen === "plan" ? "active" : ""} onClick={() => setScreen("plan")}>Season Plan</button>}{isParticipant && <button className={screen === "calibration" ? "active" : ""} onClick={() => setScreen("calibration")}>Weekly Calibration</button>}{dashboard?.role === "coach" && <button className={screen === "coach-review" ? "active" : ""} onClick={() => setScreen("coach-review")}>Coach review</button>}{DEVELOPMENT_MODE && dashboard?.role === "administrator" && <button className={screen === "administrator-setup" ? "active" : ""} onClick={() => setScreen("administrator-setup")}>Setup</button>}<button className={screen === "outbox" ? "active" : ""} onClick={() => setScreen("outbox")}>Outbox{outbox.length > 0 ? ` · ${outbox.length}` : ""}</button></nav>
     {notice && <aside className="notice">{notice}</aside>}
     {screen === "anvil" && isParticipant && dashboard?.latest_review && <ParticipantReview review={dashboard.latest_review} reopened={Boolean(dashboard?.latest_calibration && dashboard.reopened_weeks?.includes(dashboard.latest_calibration.week))} />}
     {screen === "anvil" && isParticipant && dashboard?.weekly_due && <WeeklyDueState due={dashboard.weekly_due} />}
@@ -343,6 +446,7 @@ function App() {
     {screen === "calibration" && <Deck eyebrow={`Week ${dashboard?.current_week ?? 1} · Weekly Calibration`} steps={calibrationSteps} submitLabel="Submit calibration" onSubmit={submitCalibration} />}
     {screen === "coach-review" && <CoachReview participant={reviewParticipant} participants={coachRecords} feedback={feedback} requestRevision={requestRevision} onFeedbackChange={setFeedback} onRequestRevisionChange={setRequestRevision} onOpen={(participantId) => void openCoachReview(participantId)} onSubmit={submitCoachReview} onReopen={() => void reopenCalibration()} />}
     {DEVELOPMENT_MODE && screen === "administrator-setup" && dashboard?.role === "administrator" && <AdministratorSetup onNotice={setNotice} onAccountsChanged={refreshAccounts} />}
+    {screen === "outbox" && <OutboxStatus items={outbox} online={online} onRetry={retryOutboxItem} onRetryAll={retryAllOutbox} onDiscard={discardOutboxItem} />}
   </main>;
 }
 
