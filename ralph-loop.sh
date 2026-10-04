@@ -4,6 +4,23 @@ set -euo pipefail
 # Runs one OpenCode session per iteration. Each session follows ralph/PROMPT.md,
 # commits its cohesive change, and the next session continues from the worktree.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Ensure the tools each iteration needs are on PATH. Non-login shells (and the
+# shells spawned inside each OpenCode session) do not source the user profile,
+# so without this the loop cannot find opencode, uv, or npm.
+for tool_dir in "$HOME/.opencode/bin" "$HOME/.cargo/bin" "$HOME/.local/bin"; do
+  if [[ -d "$tool_dir" ]]; then
+    PATH="$tool_dir:$PATH"
+  fi
+done
+if ! command -v npm >/dev/null 2>&1 && [[ -d "$HOME/.nvm/versions/node" ]]; then
+  nvm_node_bin="$(ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -n 1)"
+  if [[ -n "$nvm_node_bin" ]]; then
+    PATH="$nvm_node_bin:$PATH"
+  fi
+fi
+export PATH
+
 MAX_ITERATIONS="${RALPH_MAX_ITERATIONS:-12}"
 MODEL="${RALPH_MODEL:-}"
 AGENT="${RALPH_AGENT:-}"
