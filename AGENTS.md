@@ -24,3 +24,7 @@ Examples:
 - `chore(deps): update locked development tools`
 
 Use a type appropriate to the change, such as `feat`, `fix`, `docs`, `refactor`, `test`, `build`, or `chore`. Keep the summary lower-case, concise, and without a trailing period.
+
+## Pushing
+
+Always push the current branch to `origin` after finishing a session's work, so no commits are left local. If `origin` is not configured or the push fails, report it rather than leaving the work unpushed silently.

@@ -54,6 +54,14 @@ This is Ralph iteration ${iteration} of ${MAX_ITERATIONS}. Work in ${ROOT}. Begi
   printf 'Starting Ralph iteration %s/%s. Log: %s\n' "$iteration" "$MAX_ITERATIONS" "$log_file"
   "${command[@]}" "$prompt" 2>&1 | tee "$log_file"
 
+  # Always push the session's commits to origin so work is never left local.
+  if git -C "$ROOT" remote get-url origin >/dev/null 2>&1; then
+    printf 'Pushing %s to origin.\n' "$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)"
+    git -C "$ROOT" push origin HEAD || printf 'warning: git push to origin failed; continuing.\n' >&2
+  else
+    printf 'warning: no origin remote configured; skipping push.\n' >&2
+  fi
+
   if grep -q "RALPH_COMPLETE" "$log_file"; then
     printf 'Ralph reports the prioritized backlog is complete.\n'
     exit 0
@@ -62,8 +70,8 @@ This is Ralph iteration ${iteration} of ${MAX_ITERATIONS}. Work in ${ROOT}. Begi
     printf 'Ralph reported a blocker. See %s\n' "$log_file" >&2
     exit 2
   fi
-  if ! grep -qE '^\- \[ \] \*\*P[01]' "$ROOT/TODO.md"; then
-    printf 'No unchecked P0/P1 TODO items remain.\n'
+  if ! grep -qE '^\- \[ \] \*\*P' "$ROOT/TODO.md"; then
+    printf 'No unchecked TODO items remain.\n'
     exit 0
   fi
 done

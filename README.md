@@ -32,7 +32,7 @@ The local API seeds a participant named Marcus at `demo-member`. Build the brows
 
 ### Autonomous Delivery Loop
 
-`TODO.md` is the prioritized execution backlog. The Ralph loop runs OpenCode against one highest-priority TODO item per iteration, requires verification and a Conventional Commit, and stops on completion, a documented blocker, or an iteration limit.
+`TODO.md` is the prioritized execution backlog. The Ralph loop runs OpenCode against one highest-priority TODO item per iteration, requires verification and a Conventional Commit, pushes each session's commits to `origin`, and stops on completion of every backlog item, a documented blocker, or an iteration limit.
 
 ```bash
 cd ~/3f-app

@@ -23,4 +23,4 @@ You are the autonomous implementation agent for 3F App. Your objective is to com
 
 ## Completion Rule
 
-When every unchecked P0 and P1 item in `TODO.md` is complete, verified, and committed, end the response with `RALPH_COMPLETE`. Otherwise, end with a concise report naming the completed TODO item, commit hash, tests run, and the next highest-priority item.
+When every unchecked item in `TODO.md` is complete, verified, and committed, end the response with `RALPH_COMPLETE`. Otherwise, end with a concise report naming the completed TODO item, commit hash, tests run, and the next highest-priority item.
