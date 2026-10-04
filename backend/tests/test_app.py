@@ -361,3 +361,88 @@ def test_crucible_relationships_and_channel_boundaries() -> None:
     assert {member["role"] for member in detail["members"]} == {"captain", "coach", "participant"}
     assert detail["circles"][0]["coach_sponsor_id"] == "coach-ben"
     assert detail["channels"][0]["member_ids"] == ["student-cai", "student-dee", "coach-ben"]
+
+
+def build_alpha_channel_client() -> TestClient:
+    client = TestClient(create_app())
+    assert client.post("/api/crucibles", json={
+        "command_id": "alpha-crucible", "crucible_id": "alpha", "name": "The Ordered Life Season",
+        "review_week_start": "2026-09-01", "refinement_week_start": "2026-09-08", "launch_date": "2026-09-15",
+    }).status_code == 201
+    for command_id, member_id, name, role in [
+        ("alpha-captain", "captain-ada", "Captain Ada", "captain"),
+        ("alpha-coach", "coach-ben", "Coach Ben", "coach"),
+        ("alpha-student-one", "student-cai", "Cai", "participant"),
+        ("alpha-student-two", "student-dee", "Dee", "participant"),
+    ]:
+        assert client.post("/api/crucibles/alpha/members", json={"command_id": command_id, "member_id": member_id, "name": name, "role": role}).status_code == 201
+    assert client.post("/api/crucibles/alpha/coach-assignments", json={"command_id": "alpha-coach-link", "member_id": "student-cai", "mentor_id": "coach-ben"}).status_code == 201
+    assert client.post("/api/crucibles/alpha/circles", json={
+        "command_id": "alpha-buddy", "circle_id": "buddy-cai-dee", "name": "Cai and Dee", "kind": "buddy",
+        "member_ids": ["student-cai", "student-dee"], "coach_sponsor_id": "coach-ben",
+    }).status_code == 201
+    assert client.post("/api/crucibles/alpha/channels", json={
+        "command_id": "alpha-buddy-channel", "channel_id": "buddy-channel", "name": "Cai and Dee", "kind": "buddy",
+        "member_ids": ["student-cai", "student-dee", "coach-ben"], "circle_id": "buddy-cai-dee",
+    }).status_code == 201
+    return client
+
+
+def test_authorized_channel_messaging_and_unread_state() -> None:
+    client = build_alpha_channel_client()
+
+    posted = client.post("/api/channels/buddy-channel/messages", json={
+        "command_id": "message-1", "author_id": "student-cai", "body": "Morning, ready for the week?",
+    })
+    assert posted.status_code == 201
+    assert posted.json()["status"] == "posted"
+
+    # The author's own message never counts against their unread state.
+    author_inbox = client.get("/api/members/student-cai/channels").json()
+    buddy = next(channel for channel in author_inbox["channels"] if channel["channel_id"] == "buddy-channel")
+    assert buddy["unread_count"] == 0
+    assert buddy["last_message"]["body"] == "Morning, ready for the week?"
+
+    # A fellow participant sees one unread message and its preview.
+    reader_inbox = client.get("/api/members/student-dee/channels").json()
+    reader_buddy = next(channel for channel in reader_inbox["channels"] if channel["channel_id"] == "buddy-channel")
+    assert reader_buddy["unread_count"] == 1
+    assert reader_inbox["unread_total"] == 1
+
+    # Messages are returned in order with the body intact.
+    messages = client.get("/api/members/student-dee/channels/buddy-channel/messages").json()
+    assert messages["messages"][0]["body"] == "Morning, ready for the week?"
+    assert messages["messages"][0]["author_id"] == "student-cai"
+    assert messages["unread_count"] == 1
+
+    # Marking read clears the unread count for that member only.
+    assert client.post("/api/channels/buddy-channel/read", json={"command_id": "read-1", "member_id": "student-dee"}).status_code == 201
+    after_read = client.get("/api/members/student-dee/channels").json()
+    assert next(channel for channel in after_read["channels"] if channel["channel_id"] == "buddy-channel")["unread_count"] == 0
+
+    # A Coach who is a channel member may post; an unassigned Captain may not.
+    assert client.post("/api/channels/buddy-channel/messages", json={
+        "command_id": "message-2", "author_id": "coach-ben", "body": "Hold the line together.",
+    }).status_code == 201
+    forbidden_post = client.post("/api/channels/buddy-channel/messages", json={
+        "command_id": "message-outsider", "author_id": "captain-ada", "body": "This must not be accepted.",
+    })
+    assert forbidden_post.status_code == 403
+    assert client.get("/api/members/captain-ada/channels").json()["channels"] == []
+    assert client.get("/api/members/captain-ada/channels/buddy-channel/messages").status_code == 403
+
+    # Persisted as durable domain events.
+    events = client.get("/api/events").json()
+    assert [event["name"] for event in events].count("ChannelMessagePosted") == 2
+    assert [event["name"] for event in events].count("ChannelRead") == 1
+
+
+def test_seeded_channels_are_relationship_scoped() -> None:
+    client = TestClient(create_app())
+    demo_inbox = client.get("/api/members/demo-member/channels").json()
+    assert {channel["channel_id"] for channel in demo_inbox["channels"]} == {"whole-crucible", "coach-direct-demo"}
+
+    # A member only sees channels they belong to; membership is explicit.
+    captain_inbox = client.get("/api/members/captain-silas/channels").json()
+    assert {channel["channel_id"] for channel in captain_inbox["channels"]} == {"whole-crucible"}
+    assert client.get("/api/members/captain-silas/channels/coach-direct-demo/messages").status_code == 403

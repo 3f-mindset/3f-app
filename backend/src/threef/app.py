@@ -287,6 +287,17 @@ class ReopenCalibrationCommand(BaseModel):
     reason: str = Field(min_length=5, max_length=2000)
 
 
+class PostChannelMessageCommand(BaseModel):
+    command_id: str = Field(default_factory=lambda: str(uuid4()))
+    author_id: str = Field(min_length=1)
+    body: str = Field(min_length=1, max_length=2000)
+
+
+class MarkChannelReadCommand(BaseModel):
+    command_id: str = Field(default_factory=lambda: str(uuid4()))
+    member_id: str = Field(min_length=1)
+
+
 class CreateCrucibleCommand(BaseModel):
     command_id: str = Field(default_factory=lambda: str(uuid4()))
     crucible_id: str = Field(min_length=3, max_length=80)
@@ -362,6 +373,8 @@ class ReadModel:
         self.crucibles: dict[str, dict[str, Any]] = {}
         self.circles: dict[str, dict[str, Any]] = {}
         self.channels: dict[str, dict[str, Any]] = {}
+        self.messages: dict[str, list[dict[str, Any]]] = {}
+        self.channel_reads: dict[tuple[str, str], int] = {}
 
     def member(self, member_id: str) -> MemberProjection:
         if member_id not in self.members:
@@ -387,6 +400,13 @@ class ReadModel:
             self.circles[payload["circle_id"]] = payload
         elif event.name == "ChannelCreated":
             self.channels[payload["channel_id"]] = payload
+            self.messages.setdefault(payload["channel_id"], [])
+        elif event.name == "ChannelMessagePosted":
+            channel_messages = self.messages.setdefault(payload["channel_id"], [])
+            channel_messages.append(payload)
+            self.channel_reads[(payload["channel_id"], payload["author_id"])] = len(channel_messages)
+        elif event.name == "ChannelRead":
+            self.channel_reads[(payload["channel_id"], payload["member_id"])] = payload["message_count"]
         elif event.name == "SeasonPlanSubmitted":
             self.member(payload["member_id"]).season_plan = payload
         elif event.name == "WeeklyCalibrationSubmitted":
@@ -428,6 +448,14 @@ class ApplicationService:
             })
         self._append("relationship:demo-member:coach", "seed-coach-assignment", "CoachAssignedToParticipant", {"crucible_id": "demo-crucible", "member_id": "demo-member", "mentor_id": "coach-elias"})
         self._append("relationship:coach-elias:captain", "seed-captain-assignment", "CaptainAssignedToCoach", {"crucible_id": "demo-crucible", "member_id": "coach-elias", "mentor_id": "captain-silas"})
+        self._append("channel:whole-crucible", "seed-whole-channel", "ChannelCreated", {
+            "channel_id": "whole-crucible", "name": "The Stewardship Season", "kind": ChannelType.WHOLE_CRUCIBLE.value,
+            "member_ids": ["admin-amos", "captain-silas", "coach-elias", "demo-member"], "circle_id": None, "crucible_id": "demo-crucible",
+        })
+        self._append("channel:coach-direct-demo", "seed-coach-direct-channel", "ChannelCreated", {
+            "channel_id": "coach-direct-demo", "name": "Coach Elias · Marcus", "kind": ChannelType.COACH_DIRECT.value,
+            "member_ids": ["demo-member", "coach-elias"], "circle_id": None, "crucible_id": "demo-crucible",
+        })
 
     def create_crucible(self, command: CreateCrucibleCommand) -> dict[str, Any]:
         if command.crucible_id in self.read_model.crucibles:
@@ -501,6 +529,86 @@ class ApplicationService:
         payload = command.model_dump() | {"crucible_id": crucible["crucible_id"]}
         events = self._append(f"channel:{command.channel_id}", command.command_id, "ChannelCreated", payload)
         return {"event_ids": [event.id for event in events], "channel_id": command.channel_id}
+
+    def authorize_channel_member(self, channel: dict[str, Any], member_id: str) -> MemberProjection:
+        member = self.member_or_404(member_id)
+        if member_id not in channel["member_ids"]:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Member is not authorized for this channel.")
+        if member.crucible_id != channel["crucible_id"]:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Member is not enrolled in this Crucible.")
+        return member
+
+    def channel_or_404(self, channel_id: str) -> dict[str, Any]:
+        if channel_id not in self.read_model.channels:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Channel not found.")
+        return self.read_model.channels[channel_id]
+
+    def post_channel_message(self, channel_id: str, command: PostChannelMessageCommand) -> dict[str, Any]:
+        channel = self.channel_or_404(channel_id)
+        self.authorize_channel_member(channel, command.author_id)
+        message_id = str(uuid4())
+        payload = {
+            "channel_id": channel_id,
+            "crucible_id": channel["crucible_id"],
+            "message_id": message_id,
+            "author_id": command.author_id,
+            "body": command.body,
+            "posted_at": self._clock().isoformat(),
+        }
+        events = self._append(f"channel:{channel_id}:messages", command.command_id, "ChannelMessagePosted", payload)
+        return {"event_ids": [event.id for event in events], "message_id": message_id, "status": "posted"}
+
+    def mark_channel_read(self, channel_id: str, command: MarkChannelReadCommand) -> dict[str, Any]:
+        channel = self.channel_or_404(channel_id)
+        self.authorize_channel_member(channel, command.member_id)
+        message_count = len(self.read_model.messages.get(channel_id, []))
+        payload = {
+            "channel_id": channel_id,
+            "crucible_id": channel["crucible_id"],
+            "member_id": command.member_id,
+            "message_count": message_count,
+            "read_at": self._clock().isoformat(),
+        }
+        events = self._append(f"channel:{channel_id}:read:{command.member_id}", command.command_id, "ChannelRead", payload)
+        return {"event_ids": [event.id for event in events], "status": "read", "unread_count": 0}
+
+    def channel_inbox(self, member_id: str) -> dict[str, Any]:
+        member = self.member_or_404(member_id)
+        channels: list[dict[str, Any]] = []
+        for channel in self.read_model.channels.values():
+            if member.member_id not in channel["member_ids"]:
+                continue
+            messages = self.read_model.messages.get(channel["channel_id"], [])
+            read_count = self.read_model.channel_reads.get((channel["channel_id"], member_id), 0)
+            last = messages[-1] if messages else None
+            channels.append({
+                "channel_id": channel["channel_id"],
+                "name": channel["name"],
+                "kind": channel["kind"],
+                "member_count": len(channel["member_ids"]),
+                "message_count": len(messages),
+                "unread_count": max(0, len(messages) - read_count),
+                "last_message": {"author_id": last["author_id"], "body": last["body"], "posted_at": last["posted_at"]} if last else None,
+            })
+        channels.sort(key=lambda item: item["last_message"]["posted_at"] if item["last_message"] else "", reverse=True)
+        return {
+            "member_id": member.member_id,
+            "channels": channels,
+            "unread_total": sum(item["unread_count"] for item in channels),
+        }
+
+    def channel_messages(self, member_id: str, channel_id: str) -> dict[str, Any]:
+        channel = self.channel_or_404(channel_id)
+        self.authorize_channel_member(channel, member_id)
+        messages = self.read_model.messages.get(channel_id, [])
+        read_count = self.read_model.channel_reads.get((channel_id, member_id), 0)
+        return {
+            "channel": {"channel_id": channel["channel_id"], "name": channel["name"], "kind": channel["kind"], "member_ids": list(channel["member_ids"])},
+            "messages": list(messages),
+            "message_count": len(messages),
+            "read_count": read_count,
+            "unread_count": max(0, len(messages) - read_count),
+        }
 
     def submit_plan(self, command: SeasonPlanCommand) -> dict[str, Any]:
         self.member_or_404(command.member_id)
@@ -793,6 +901,22 @@ def create_app(development_mode: bool | None = None, clock: Callable[[], datetim
     @app.post("/api/crucibles/{crucible_id}/channels", status_code=status.HTTP_201_CREATED)
     def create_channel(crucible_id: str, command: CreateChannelCommand) -> dict[str, Any]:
         return service.create_channel(crucible_id, command)
+
+    @app.get("/api/members/{member_id}/channels")
+    def channel_inbox(member_id: str) -> dict[str, Any]:
+        return service.channel_inbox(member_id)
+
+    @app.get("/api/members/{member_id}/channels/{channel_id}/messages")
+    def channel_messages(member_id: str, channel_id: str) -> dict[str, Any]:
+        return service.channel_messages(member_id, channel_id)
+
+    @app.post("/api/channels/{channel_id}/messages", status_code=status.HTTP_201_CREATED)
+    def post_channel_message(channel_id: str, command: PostChannelMessageCommand) -> dict[str, Any]:
+        return service.post_channel_message(channel_id, command)
+
+    @app.post("/api/channels/{channel_id}/read", status_code=status.HTTP_201_CREATED)
+    def mark_channel_read(channel_id: str, command: MarkChannelReadCommand) -> dict[str, Any]:
+        return service.mark_channel_read(channel_id, command)
 
     @app.post("/api/season-plans", status_code=status.HTTP_201_CREATED)
     def submit_plan(command: SeasonPlanCommand) -> dict[str, Any]:

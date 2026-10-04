@@ -407,6 +407,8 @@ Representative events:
 - `WeeklyCalibrationReviewed`
 - `WeeklyCalibrationReopened`
 - `ChannelMembershipGranted`
+- `ChannelMessagePosted`
+- `ChannelRead`
 - `NotificationPreferenceChanged`
 - `NotificationScheduled`
 - `NotificationSuppressed`
@@ -452,6 +454,10 @@ The local event-sourced API now supports the foundation of this milestone:
 - `GET /api/coaches/{coach_id}/participants/{participant_id}` for an assigned Coach's full submitted calibration record; unassigned relationships are rejected.
 - `GET /api/captains/{captain_id}/coaches/{coach_id}/status` for an assigned Captain's Coach completion and review-state projection. It returns roster names, plan/submission/review state, and aggregate counts only, never participant calibration or feedback content.
 - `GET /api/participants/{member_id}/weekly-due-state` for the participant's per-week operating state, also embedded as `weekly_due` in `GET /api/dashboard/{member_id}`.
+- `GET /api/members/{member_id}/channels` for the channels a member explicitly belongs to, each with its message and unread counts.
+- `GET /api/members/{member_id}/channels/{channel_id}/messages` for authorized thread history; channel membership is required.
+- `POST /api/channels/{channel_id}/messages` to persist a channel message as a `ChannelMessagePosted` event.
+- `POST /api/channels/{channel_id}/read` to advance the member's `ChannelRead` position and clear their unread count.
 
 The POC validates that buddy pairs have two members, triads have three, Coach sponsors are Coaches in the same Crucible, circle channels match their circle membership, participant-private channels exclude Coaches and Captains, and Captain visibility is limited to assigned Coach status without participant calibration content.
 
@@ -474,6 +480,14 @@ A Coach reopening a week returns it to the participant's action queue (`opened`,
 Season Plan and weekly calibration templates are versioned by `TEMPLATE_VERSION`. A submission embeds its template snapshot in the `SeasonPlanSubmitted` or `WeeklyCalibrationSubmitted` event, so a Coach reviewing old work sees the exact prompts and scale definitions the participant answered. The reference catalog is available at `GET /api/reference/templates`.
 
 In the PWA, a Coach selects **Coach review** in the Anvil, opens an assigned participant's submitted calibration, sees each of the six 3F sections, then sends participant-visible feedback or requests a revision. The review is stored as a `WeeklyCalibrationReviewed` event.
+
+### Authorized Text Channels
+
+Text channels are explicit, membership-scoped conversations. A member can only list, read, or post in a channel whose `member_ids` include them and that belongs to their Crucible, so global role alone never grants access. Membership is set when the channel is created through `POST /api/crucibles/{crucible_id}/channels`.
+
+Messages are durable `ChannelMessagePosted` events on the channel's append-only stream. `GET /api/members/{member_id}/channels` returns each authorized channel with its unread count and a last-message preview; `GET /api/members/{member_id}/channels/{channel_id}/messages` returns the ordered thread. A member's own posts never count against their unread state, and `POST /api/channels/{channel_id}/read` records a `ChannelRead` event that advances that member's read position to the current message count.
+
+In the PWA, the **Channels** screen lists the active member's authorized channels with unread badges, opens a thread, and sends messages. Sends go through the same durable outbox as every other command, so a message composed offline is queued with its client-generated ID and synchronizes exactly once on reconnection.
 
 ### Milestone 2: Season Design Journey
 

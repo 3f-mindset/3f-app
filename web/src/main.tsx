@@ -30,6 +30,10 @@ type CaptainCoachStatus = {
   participants: { member_id: string; name: string; season_plan_status: string; calibration: { week: number; review_status: "awaiting_review" | "reviewed" | "revision_requested" } | null }[];
 };
 type ScaleItem = { value: string; level: number; label: string; definition: string };
+type ChannelSummary = { channel_id: string; name: string; kind: string; member_count: number; message_count: number; unread_count: number; last_message: { author_id: string; body: string; posted_at: string } | null };
+type ChannelInbox = { member_id: string; channels: ChannelSummary[]; unread_total: number };
+type ChannelMessage = { channel_id: string; message_id: string; author_id: string; body: string; posted_at: string };
+type ChannelThread = { channel: { channel_id: string; name: string; kind: string; member_ids: string[] }; messages: ChannelMessage[]; message_count: number; read_count: number; unread_count: number };
 type OutboxItem = { id: string; endpoint: string; body: unknown; label?: string; queuedAt?: string; status?: "pending" | "rejected"; error?: string; statusCode?: number | null };
 type DeckStep = { section: string; prompt: string; hint?: string; content: ReactNode };
 
@@ -78,6 +82,7 @@ const describeCommand = (endpoint: string): string => {
   if (endpoint.includes("/season-plans")) return "Season Plan";
   if (endpoint.includes("/review")) return "Coach review";
   if (endpoint.includes("/reopen")) return "Revision request";
+  if (endpoint.includes("/messages")) return "Channel message";
   if (endpoint.includes("/calibrations")) return "Weekly Calibration";
   if (endpoint.includes("/coach-assignments") || endpoint.includes("/captain-assignments")) return "Assignment";
   if (endpoint.includes("/members")) return "Enroll member";
@@ -233,6 +238,36 @@ function CaptainVisibility({ records }: { records: CaptainCoachStatus[] }) {
   return <section className="record-list"><p className="eyebrow">Coach visibility</p>{records.map((record) => <article key={record.coach.member_id}><div><strong>{record.coach.name}</strong><span>{record.summary.participant_count} participant{record.summary.participant_count === 1 ? "" : "s"}</span></div><dl><div><dt>Plans</dt><dd>{record.summary.plans_submitted} / {record.summary.participant_count}</dd></div><div><dt>Submitted</dt><dd>{record.summary.calibrations_submitted} / {record.summary.participant_count}</dd></div><div><dt>Reviewed</dt><dd>{record.summary.calibrations_reviewed} / {record.summary.calibrations_submitted}</dd></div></dl>{record.participants.map((participant) => <p key={participant.member_id}><b>{participant.name}</b> · {participant.calibration ? `Week ${participant.calibration.week} · ${participant.calibration.review_status.replace("_", " ")}` : "No calibration submitted"}</p>)}</article>)}</section>;
 }
 
+function Channels({ inbox, thread, memberId, draft, onDraftChange, onOpen, onBack, onSend }: {
+  inbox: ChannelInbox | null; thread: ChannelThread | null; memberId: string; draft: string;
+  onDraftChange: (value: string) => void; onOpen: (channelId: string) => void; onBack: () => void; onSend: () => void;
+}) {
+  if (thread) return <section className="channel-thread">
+    <button className="back" onClick={onBack}>All channels</button>
+    <p className="eyebrow">{thread.channel.kind.replaceAll("_", " ")} · {thread.channel.member_ids.length} members</p>
+    <h1>{thread.channel.name}</h1>
+    <div className="messages">{thread.messages.length === 0
+      ? <p className="lead">No messages yet. Start the conversation.</p>
+      : thread.messages.map((message) => <article key={message.message_id} className={message.author_id === memberId ? "message mine" : "message"}>
+        <div><strong>{message.author_id}</strong><small>{new Date(message.posted_at).toLocaleString()}</small></div>
+        <p>{message.body}</p>
+      </article>)}</div>
+    <div className="composer">
+      <textarea value={draft} placeholder="Write a message to this channel..." onChange={(event) => onDraftChange(event.target.value)} />
+      <button className="primary" disabled={!draft.trim()} onClick={onSend}>Send</button>
+    </div>
+  </section>;
+  return <section className="record-list">
+    <p className="eyebrow">Authorized channels</p>
+    {!inbox ? <p>Loading your channels...</p>
+      : inbox.channels.length === 0 ? <p>You are not a member of any channel yet.</p>
+      : inbox.channels.map((channel) => <button type="button" className="channel-row" key={channel.channel_id} onClick={() => onOpen(channel.channel_id)}>
+        <div><strong>{channel.name}</strong><span>{channel.kind.replaceAll("_", " ")} · {channel.member_count} members</span></div>
+        {channel.unread_count > 0 ? <b className="unread-badge">{channel.unread_count}</b> : <small>{channel.last_message ? channel.last_message.body.slice(0, 48) : "No messages"}</small>}
+      </button>)}
+  </section>;
+}
+
 function OutboxStatus({ items, online, onRetry, onRetryAll, onDiscard }: {
   items: OutboxItem[]; online: boolean;
   onRetry: (item: OutboxItem) => void; onRetryAll: () => void; onDiscard: (item: OutboxItem) => void;
@@ -292,7 +327,7 @@ function AdministratorSetup({ onNotice, onAccountsChanged }: { onNotice: (messag
 }
 
 function App() {
-  const [screen, setScreen] = useState<"anvil" | "plan" | "calibration" | "coach-review" | "administrator-setup" | "outbox">("anvil");
+  const [screen, setScreen] = useState<"anvil" | "plan" | "calibration" | "coach-review" | "administrator-setup" | "channels" | "outbox">("anvil");
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [coachRecords, setCoachRecords] = useState<Dashboard[]>([]);
   const [captainRecords, setCaptainRecords] = useState<CaptainCoachStatus[]>([]);
@@ -308,6 +343,9 @@ function App() {
   const [reviewParticipant, setReviewParticipant] = useState<Dashboard | null>(null);
   const [feedback, setFeedback] = useState("");
   const [requestRevision, setRequestRevision] = useState(false);
+  const [channelInbox, setChannelInbox] = useState<ChannelInbox | null>(null);
+  const [activeChannel, setActiveChannel] = useState<ChannelThread | null>(null);
+  const [messageDraft, setMessageDraft] = useState("");
 
   const refresh = () => fetch(`${API}/api/dashboard/${activeMemberId}`).then((response) => response.json()).then(setDashboard).catch(() => setNotice("Working offline. Your drafts are safe on this device."));
   useEffect(() => {
@@ -336,6 +374,10 @@ function App() {
       .then((records) => setCaptainRecords(records.filter(Boolean) as CaptainCoachStatus[]))
       .catch(() => setNotice("Coach status records are unavailable while offline."));
   }, [activeMemberId, dashboard]);
+  useEffect(() => {
+    setActiveChannel(null);
+    void loadChannelInbox();
+  }, [activeMemberId]);
 
   const updatePlan = (key: string, value: string) => { const next = { ...plan, [key]: value }; setPlan(next); localStorage.setItem("threef-plan-draft", JSON.stringify(next)); };
   const updateRead = (key: string, value: string) => { const next = { ...read, [key]: value }; setRead(next); localStorage.setItem("threef-read-draft", JSON.stringify(next)); };
@@ -407,6 +449,44 @@ function App() {
     } catch { setNotice("The week was not reopened. Reconnect and try again."); }
   };
 
+  const loadChannelInbox = async () => {
+    try {
+      const response = await fetch(`${API}/api/members/${activeMemberId}/channels`);
+      setChannelInbox(response.ok ? await response.json() as ChannelInbox : null);
+    } catch { setChannelInbox(null); }
+  };
+  const openChannel = async (channelId: string) => {
+    try {
+      const response = await fetch(`${API}/api/members/${activeMemberId}/channels/${channelId}/messages`);
+      if (!response.ok) throw new Error("unavailable");
+      setActiveChannel(await response.json() as ChannelThread);
+      setScreen("channels");
+      const readId = commandId();
+      void fetch(`${API}/api/channels/${channelId}/read`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ command_id: readId, member_id: activeMemberId }) })
+        .then(() => loadChannelInbox()).catch(() => undefined);
+    } catch { setNotice("Channel messages are unavailable while offline."); }
+  };
+  const sendChannelMessage = async () => {
+    if (!activeChannel || !messageDraft.trim()) return;
+    const body = { command_id: commandId(), author_id: activeMemberId, body: messageDraft.trim() };
+    const item: OutboxItem = { id: body.command_id, endpoint: `/api/channels/${activeChannel.channel.channel_id}/messages`, body };
+    setMessageDraft("");
+    try {
+      await send(item);
+      await openChannel(activeChannel.channel.channel_id);
+      await loadChannelInbox();
+    } catch (error) {
+      if (error instanceof SyncError && error.status !== null) {
+        queue({ ...item, status: "rejected", error: error.message, statusCode: error.status });
+        setNotice(`Message needs attention: ${error.message}`);
+      } else {
+        queue(item);
+        setNotice("Message saved offline. It will send when you reconnect.");
+      }
+      setOutbox(loadOutbox());
+    }
+  };
+
   const planRoles = split(plan.roles);
   const planValues = split(plan.values);
   const isParticipant = dashboard?.role === "participant";
@@ -436,7 +516,7 @@ function App() {
   return <main>
     <header><div className="brand"><span className="mark">3F</span><div><strong>Clean Burn</strong><small>Read. Tell the truth. Strike.</small></div></div><div className={`connection ${online ? "online" : "offline"}`}>{online ? "Online" : "Offline"}</div></header>
     {DEVELOPMENT_MODE && accounts.length > 0 && <label className="account-switcher"><span>Development account</span><select value={activeMemberId} onChange={(event) => switchAccount(event.target.value)}>{accounts.map((account) => <option value={account.member_id} key={account.member_id}>{account.name} · {account.role}</option>)}</select></label>}
-    <nav><button className={screen === "anvil" ? "active" : ""} onClick={() => setScreen("anvil")}>Anvil</button>{isParticipant && <button className={screen === "plan" ? "active" : ""} onClick={() => setScreen("plan")}>Season Plan</button>}{isParticipant && <button className={screen === "calibration" ? "active" : ""} onClick={() => setScreen("calibration")}>Weekly Calibration</button>}{dashboard?.role === "coach" && <button className={screen === "coach-review" ? "active" : ""} onClick={() => setScreen("coach-review")}>Coach review</button>}{DEVELOPMENT_MODE && dashboard?.role === "administrator" && <button className={screen === "administrator-setup" ? "active" : ""} onClick={() => setScreen("administrator-setup")}>Setup</button>}<button className={screen === "outbox" ? "active" : ""} onClick={() => setScreen("outbox")}>Outbox{outbox.length > 0 ? ` · ${outbox.length}` : ""}</button></nav>
+    <nav><button className={screen === "anvil" ? "active" : ""} onClick={() => setScreen("anvil")}>Anvil</button>{isParticipant && <button className={screen === "plan" ? "active" : ""} onClick={() => setScreen("plan")}>Season Plan</button>}{isParticipant && <button className={screen === "calibration" ? "active" : ""} onClick={() => setScreen("calibration")}>Weekly Calibration</button>}{dashboard?.role === "coach" && <button className={screen === "coach-review" ? "active" : ""} onClick={() => setScreen("coach-review")}>Coach review</button>}<button className={screen === "channels" ? "active" : ""} onClick={() => { setActiveChannel(null); setScreen("channels"); void loadChannelInbox(); }}>Channels{channelInbox && channelInbox.unread_total > 0 ? ` · ${channelInbox.unread_total}` : ""}</button>{DEVELOPMENT_MODE && dashboard?.role === "administrator" && <button className={screen === "administrator-setup" ? "active" : ""} onClick={() => setScreen("administrator-setup")}>Setup</button>}<button className={screen === "outbox" ? "active" : ""} onClick={() => setScreen("outbox")}>Outbox{outbox.length > 0 ? ` · ${outbox.length}` : ""}</button></nav>
     {notice && <aside className="notice">{notice}</aside>}
     {screen === "anvil" && isParticipant && dashboard?.latest_review && <ParticipantReview review={dashboard.latest_review} reopened={Boolean(dashboard?.latest_calibration && dashboard.reopened_weeks?.includes(dashboard.latest_calibration.week))} />}
     {screen === "anvil" && isParticipant && dashboard?.weekly_due && <WeeklyDueState due={dashboard.weekly_due} />}
@@ -446,6 +526,7 @@ function App() {
     {screen === "calibration" && <Deck eyebrow={`Week ${dashboard?.current_week ?? 1} · Weekly Calibration`} steps={calibrationSteps} submitLabel="Submit calibration" onSubmit={submitCalibration} />}
     {screen === "coach-review" && <CoachReview participant={reviewParticipant} participants={coachRecords} feedback={feedback} requestRevision={requestRevision} onFeedbackChange={setFeedback} onRequestRevisionChange={setRequestRevision} onOpen={(participantId) => void openCoachReview(participantId)} onSubmit={submitCoachReview} onReopen={() => void reopenCalibration()} />}
     {DEVELOPMENT_MODE && screen === "administrator-setup" && dashboard?.role === "administrator" && <AdministratorSetup onNotice={setNotice} onAccountsChanged={refreshAccounts} />}
+    {screen === "channels" && <Channels inbox={channelInbox} thread={activeChannel} memberId={activeMemberId} draft={messageDraft} onDraftChange={setMessageDraft} onOpen={(channelId) => void openChannel(channelId)} onBack={() => { setActiveChannel(null); void loadChannelInbox(); }} onSend={() => void sendChannelMessage()} />}
     {screen === "outbox" && <OutboxStatus items={outbox} online={online} onRetry={retryOutboxItem} onRetryAll={retryAllOutbox} onDiscard={discardOutboxItem} />}
   </main>;
 }
