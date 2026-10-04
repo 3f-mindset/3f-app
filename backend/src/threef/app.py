@@ -113,6 +113,11 @@ NOTIFICATION_TYPES: dict[str, dict[str, Any]] = {
 }
 NOTIFICATION_STATUSES = ("delivered", "in_app", "digest", "suppressed")
 
+# Approved glossary terms move through a draft, published, archived lifecycle.
+# Superseded marks a version kept for history once a newer version replaces it.
+GLOSSARY_STATUSES = ("draft", "published", "archived", "superseded")
+GLOSSARY_BROWSE_STATUSES = ("published", "draft", "archived", "all")
+
 
 def default_quiet_hours() -> dict[str, Any]:
     return {"enabled": False, "days": [], "start": "22:00", "end": "07:00", "behavior": "suppress"}
@@ -549,6 +554,30 @@ class RecordNotificationCommand(BaseModel):
         return value
 
 
+class GlossaryTermCommand(BaseModel):
+    command_id: str = Field(default_factory=lambda: str(uuid4()))
+    term_id: str = Field(min_length=3, max_length=80)
+    author_id: str = Field(min_length=1)
+    title: str = Field(min_length=2, max_length=120)
+    definition: str = Field(min_length=10, max_length=4000)
+    category: str = Field(default="concept", min_length=2, max_length=60)
+    tags: list[str] = Field(default_factory=list, max_length=12)
+
+    @field_validator("tags")
+    @classmethod
+    def unique_tags(cls, tags: list[str]) -> list[str]:
+        cleaned = [tag.strip().lower() for tag in tags if tag.strip()]
+        if len(cleaned) != len(set(cleaned)):
+            raise ValueError("Glossary tags must be unique.")
+        return cleaned
+
+
+class GlossaryActionCommand(BaseModel):
+    command_id: str = Field(default_factory=lambda: str(uuid4()))
+    author_id: str = Field(min_length=1)
+    reason: str | None = Field(default=None, max_length=500)
+
+
 @dataclass
 class MemberProjection:
     member_id: str
@@ -576,6 +605,7 @@ class ReadModel:
         self.channels: dict[str, dict[str, Any]] = {}
         self.messages: dict[str, list[dict[str, Any]]] = {}
         self.channel_reads: dict[tuple[str, str], int] = {}
+        self.glossary_terms: dict[str, dict[str, Any]] = {}
 
     def member(self, member_id: str) -> MemberProjection:
         if member_id not in self.members:
@@ -608,6 +638,43 @@ class ReadModel:
             self.channel_reads[(payload["channel_id"], payload["author_id"])] = len(channel_messages)
         elif event.name == "ChannelRead":
             self.channel_reads[(payload["channel_id"], payload["member_id"])] = payload["message_count"]
+        elif event.name == "GlossaryTermDrafted":
+            term = self.glossary_terms.setdefault(payload["term_id"], {
+                "term_id": payload["term_id"], "versions": [], "latest_version": 0,
+                "draft_version": None, "published_version": None, "status": "draft",
+            })
+            for version in term["versions"]:
+                if version["status"] == "draft":
+                    version["status"] = "superseded"
+            term["versions"].append({
+                "version": payload["version"], "title": payload["title"], "definition": payload["definition"],
+                "category": payload["category"], "tags": list(payload["tags"]), "author_id": payload["author_id"],
+                "status": "draft", "drafted_at": payload["drafted_at"], "published_at": None,
+                "archived_at": None, "reason": None,
+            })
+            term["latest_version"] = payload["version"]
+            term["draft_version"] = payload["version"]
+            if term["published_version"] is None:
+                term["status"] = "draft"
+        elif event.name == "GlossaryTermPublished":
+            term = self.glossary_terms[payload["term_id"]]
+            for version in term["versions"]:
+                if version["status"] == "published":
+                    version["status"] = "superseded"
+            target = next(version for version in term["versions"] if version["version"] == payload["version"])
+            target["status"] = "published"
+            target["published_at"] = payload["published_at"]
+            term["published_version"] = payload["version"]
+            term["draft_version"] = None
+            term["status"] = "published"
+        elif event.name == "GlossaryTermArchived":
+            term = self.glossary_terms[payload["term_id"]]
+            target = next(version for version in term["versions"] if version["version"] == payload["version"])
+            target["status"] = "archived"
+            target["archived_at"] = payload["archived_at"]
+            target["reason"] = payload.get("reason")
+            term["status"] = "archived"
+            term["draft_version"] = None
         elif event.name == "SeasonPlanSubmitted":
             self.member(payload["member_id"]).season_plan = payload
         elif event.name == "WeeklyCalibrationSubmitted":
@@ -672,6 +739,20 @@ class ApplicationService:
             "channel_id": "coach-direct-demo", "name": "Coach Elias · Marcus", "kind": ChannelType.COACH_DIRECT.value,
             "member_ids": ["demo-member", "coach-elias"], "circle_id": None, "crucible_id": "demo-crucible",
         })
+        for term_id, title, definition, category, tags in [
+            ("clean-burn", "Clean Burn", "The practice of reducing internal buildup that distorts judgment, drains energy, and makes disciplined action unnecessarily difficult. It names what a man is feeding, holding, releasing, and deliberately shaping. It is not perfection, intensity, or public performance.", "concept", ["standard", "framework"]),
+            ("slag-channel", "The Slag Channel", "The part of the 3F read that names internal resistance and unreleased buildup without shame or diagnosis. Friction is exposed for awareness, not immediate fixing, so release or honest confrontation can follow.", "practice", ["friction", "3f"]),
+            ("furnace-read", "Furnace Read", "The Momentum Scale used in the Aim section. It measures internal flow versus internal buildup, not speed or output, and is stored with a numeric level, label, exact definition, and evidence statement.", "scale", ["momentum", "aim"]),
+            ("forge-read", "Forge Read", "The Responsibility Scale used in the Responsibility section. It measures how stably a man holds and shapes the load he carries, not how much he carries, and is stored with a level, label, definition, and evidence.", "scale", ["responsibility", "anvil"]),
+        ]:
+            self._append(f"glossary:{term_id}", f"seed-glossary-{term_id}", "GlossaryTermDrafted", {
+                "term_id": term_id, "author_id": "admin-amos", "title": title, "definition": definition,
+                "category": category, "tags": tags, "version": 1, "status": "draft",
+                "drafted_at": "2026-06-01T00:00:00+00:00",
+            })
+            self._append(f"glossary:{term_id}", f"seed-glossary-publish-{term_id}", "GlossaryTermPublished", {
+                "term_id": term_id, "version": 1, "author_id": "admin-amos", "published_at": "2026-06-01T00:00:00+00:00",
+            })
 
     def create_crucible(self, command: CreateCrucibleCommand) -> dict[str, Any]:
         if command.crucible_id in self.read_model.crucibles:
@@ -1194,6 +1275,137 @@ class ApplicationService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found.")
         return self.read_model.members[member_id]
 
+    def _authorize_administrator(self, member_id: str) -> MemberProjection:
+        member = self.member_or_404(member_id)
+        if member.role != ProgramRole.ADMINISTRATOR:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only an Administrator can manage the approved glossary.")
+        return member
+
+    def _glossary_or_404(self, term_id: str) -> dict[str, Any]:
+        if term_id not in self.read_model.glossary_terms:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Glossary term not found.")
+        return self.read_model.glossary_terms[term_id]
+
+    def _glossary_version(self, term: dict[str, Any], status: str) -> dict[str, Any] | None:
+        if status == "all":
+            return term["versions"][-1] if term["versions"] else None
+        if status == "draft":
+            return next((version for version in reversed(term["versions"]) if version["status"] == "draft"), None)
+        if status == "archived":
+            return next((version for version in reversed(term["versions"]) if version["status"] == "archived"), None)
+        return next((version for version in reversed(term["versions"]) if version["status"] == "published"), None)
+
+    def _glossary_summary(self, term: dict[str, Any], version: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "term_id": term["term_id"],
+            "title": version["title"],
+            "definition": version["definition"],
+            "category": version["category"],
+            "tags": list(version["tags"]),
+            "version": version["version"],
+            "status": version["status"],
+            "term_status": term["status"],
+            "has_draft": term["draft_version"] is not None,
+            "published_at": version["published_at"],
+        }
+
+    def draft_glossary_term(self, command: GlossaryTermCommand) -> dict[str, Any]:
+        self._authorize_administrator(command.author_id)
+        if command.term_id in self.read_model.glossary_terms:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Glossary term already exists. Create a revision instead.")
+        payload = command.model_dump() | {"version": 1, "status": "draft", "drafted_at": self._clock().isoformat()}
+        events = self._append(f"glossary:{command.term_id}", command.command_id, "GlossaryTermDrafted", payload)
+        return {"event_ids": [event.id for event in events], "term_id": command.term_id, "version": 1, "status": "draft"}
+
+    def revise_glossary_term(self, term_id: str, command: GlossaryTermCommand) -> dict[str, Any]:
+        self._authorize_administrator(command.author_id)
+        term = self._glossary_or_404(term_id)
+        if term["status"] == "archived":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="An archived term cannot be revised. Publish a new term instead.")
+        version = term["latest_version"] + 1
+        payload = command.model_dump() | {"term_id": term_id, "version": version, "status": "draft", "drafted_at": self._clock().isoformat()}
+        events = self._append(f"glossary:{term_id}", command.command_id, "GlossaryTermDrafted", payload)
+        return {"event_ids": [event.id for event in events], "term_id": term_id, "version": version, "status": "draft"}
+
+    def publish_glossary_term(self, term_id: str, command: GlossaryActionCommand) -> dict[str, Any]:
+        self._authorize_administrator(command.author_id)
+        term = self._glossary_or_404(term_id)
+        if term["status"] == "archived":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="An archived term cannot be published.")
+        if term["draft_version"] is None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No draft version is awaiting publication. Create a revision first.")
+        version = term["draft_version"]
+        payload = {"term_id": term_id, "version": version, "author_id": command.author_id, "published_at": self._clock().isoformat()}
+        events = self._append(f"glossary:{term_id}", command.command_id, "GlossaryTermPublished", payload)
+        return {"event_ids": [event.id for event in events], "term_id": term_id, "version": version, "status": "published"}
+
+    def archive_glossary_term(self, term_id: str, command: GlossaryActionCommand) -> dict[str, Any]:
+        self._authorize_administrator(command.author_id)
+        term = self._glossary_or_404(term_id)
+        if term["status"] == "archived":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Glossary term is already archived.")
+        version = term["published_version"] or term["latest_version"]
+        payload = {
+            "term_id": term_id, "version": version, "author_id": command.author_id,
+            "reason": command.reason, "archived_at": self._clock().isoformat(),
+        }
+        events = self._append(f"glossary:{term_id}", command.command_id, "GlossaryTermArchived", payload)
+        return {"event_ids": [event.id for event in events], "term_id": term_id, "version": version, "status": "archived"}
+
+    def browse_glossary(
+        self,
+        query: str | None = None,
+        category: str | None = None,
+        status_filter: str = "published",
+        viewer_id: str | None = None,
+    ) -> dict[str, Any]:
+        if status_filter not in GLOSSARY_BROWSE_STATUSES:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Unknown glossary status filter.")
+        if status_filter != "published":
+            viewer = self.member_or_404(viewer_id) if viewer_id else None
+            if viewer is None or viewer.role != ProgramRole.ADMINISTRATOR:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only an Administrator can browse unpublished glossary terms.")
+        needle = query.strip().lower() if query else None
+        terms: list[dict[str, Any]] = []
+        for term in self.read_model.glossary_terms.values():
+            version = self._glossary_version(term, status_filter)
+            if version is None:
+                continue
+            if category and version["category"].lower() != category.lower():
+                continue
+            if needle:
+                haystack = " ".join([version["title"], version["definition"], version["category"], *version["tags"]]).lower()
+                if needle not in haystack:
+                    continue
+            terms.append(self._glossary_summary(term, version))
+        terms.sort(key=lambda item: item["title"].lower())
+        return {
+            "terms": terms,
+            "total": len(terms),
+            "query": query,
+            "category": category,
+            "status": status_filter,
+        }
+
+    def glossary_term(self, term_id: str, viewer_id: str | None = None) -> dict[str, Any]:
+        term = self._glossary_or_404(term_id)
+        viewer = self.member_or_404(viewer_id) if viewer_id else None
+        is_admin = viewer is not None and viewer.role == ProgramRole.ADMINISTRATOR
+        live = self._glossary_version(term, "published")
+        if live is None and not is_admin:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Glossary term not found.")
+        display = live or term["versions"][-1]
+        result = self._glossary_summary(term, display)
+        versions = term["versions"] if is_admin else [version for version in term["versions"] if version["status"] == "published"]
+        result["versions"] = [
+            {
+                "version": version["version"], "title": version["title"], "status": version["status"],
+                "drafted_at": version["drafted_at"], "published_at": version["published_at"],
+            }
+            for version in versions
+        ]
+        return result
+
     def crucible_or_404(self, crucible_id: str) -> dict[str, Any]:
         if crucible_id not in self.read_model.crucibles:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Crucible not found.")
@@ -1349,6 +1561,35 @@ def create_app(development_mode: bool | None = None, clock: Callable[[], datetim
     @app.post("/api/calibrations/{member_id}/{week}/reopen", status_code=status.HTTP_201_CREATED)
     def reopen_calibration(member_id: str, week: int, command: ReopenCalibrationCommand) -> dict[str, Any]:
         return service.reopen_calibration(member_id, week, command)
+
+    @app.get("/api/glossary")
+    def browse_glossary(
+        q: str | None = None,
+        category: str | None = None,
+        status_filter: str = "published",
+        viewer_id: str | None = None,
+    ) -> dict[str, Any]:
+        return service.browse_glossary(query=q, category=category, status_filter=status_filter, viewer_id=viewer_id)
+
+    @app.get("/api/glossary/{term_id}")
+    def glossary_term(term_id: str, viewer_id: str | None = None) -> dict[str, Any]:
+        return service.glossary_term(term_id, viewer_id)
+
+    @app.post("/api/glossary", status_code=status.HTTP_201_CREATED)
+    def draft_glossary_term(command: GlossaryTermCommand) -> dict[str, Any]:
+        return service.draft_glossary_term(command)
+
+    @app.post("/api/glossary/{term_id}/revisions", status_code=status.HTTP_201_CREATED)
+    def revise_glossary_term(term_id: str, command: GlossaryTermCommand) -> dict[str, Any]:
+        return service.revise_glossary_term(term_id, command)
+
+    @app.post("/api/glossary/{term_id}/publish", status_code=status.HTTP_201_CREATED)
+    def publish_glossary_term(term_id: str, command: GlossaryActionCommand) -> dict[str, Any]:
+        return service.publish_glossary_term(term_id, command)
+
+    @app.post("/api/glossary/{term_id}/archive", status_code=status.HTTP_201_CREATED)
+    def archive_glossary_term(term_id: str, command: GlossaryActionCommand) -> dict[str, Any]:
+        return service.archive_glossary_term(term_id, command)
 
     @app.get("/api/events")
     def events() -> list[dict[str, Any]]:

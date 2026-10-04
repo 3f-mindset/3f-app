@@ -414,6 +414,9 @@ Representative events:
 - `NotificationSuppressed`
 - `ClientCommandSynchronized`
 - `SynchronizationConflictDetected`
+- `GlossaryTermDrafted`
+- `GlossaryTermPublished`
+- `GlossaryTermArchived`
 
 ## Privacy And Safety
 
@@ -462,6 +465,8 @@ The local event-sourced API now supports the foundation of this milestone:
 - `POST /api/members/{member_id}/notification-devices` and `/notification-devices/unsubscribe` to opt a device in or out of push.
 - `POST /api/members/{member_id}/channel-mutes` and `/channel-mutes/unmute` to mute or restore a channel's social alerts, permanently or until a chosen time.
 - `POST /api/members/{member_id}/notifications` to evaluate and record a notification, and `GET /api/members/{member_id}/notifications` for the in-app notification center.
+- `GET /api/glossary` and `GET /api/glossary/{term_id}` for approved knowledge browse, search, category filters, and version detail.
+- `POST /api/glossary`, `/api/glossary/{term_id}/revisions`, `/api/glossary/{term_id}/publish`, and `/api/glossary/{term_id}/archive` for Administrator glossary authoring.
 
 The POC validates that buddy pairs have two members, triads have three, Coach sponsors are Coaches in the same Crucible, circle channels match their circle membership, participant-private channels exclude Coaches and Captains, and Captain visibility is limited to assigned Coach status without participant calibration content.
 
@@ -503,6 +508,17 @@ Notifications are evaluated server-side against the member's explicit preference
 - **Push payloads stay generic.** A channel message produces a notification such as `"student-cai posted in Cai and Dee. Open 3F to read it."`, never the message body, so a locked device does not expose private coaching content.
 
 Each decision is durable: `NotificationPreferenceChanged`, `NotificationDeviceSubscribed`, `NotificationDeviceUnsubscribed`, `ChannelMuteChanged`, `NotificationScheduled`, and `NotificationSuppressed` events are appended to the member's streams. Posting a channel message generates one idempotent notification per other channel member, keyed by the message's command ID, so replaying an offline send never duplicates an alert. The PWA exposes a **Notifications** screen for device opt-in, quiet-hours and timezone editing, channel mutes, and the in-app notification center, where suppressed alerts stay available for audit but are hidden by default.
+
+### Approved Knowledge Glossary
+
+The glossary is the reviewed source of 3F framework language. Only **published** terms are approved knowledge and readable by every member; drafts, revisions, and archived terms remain with the Administrator.
+
+- **Draft and version.** An Administrator drafts a term with `POST /api/glossary`, which appends a `GlossaryTermDrafted` event. Each revision via `POST /api/glossary/{term_id}/revisions` creates the next immutable version while the currently published version stays live.
+- **Publish.** `POST /api/glossary/{term_id}/publish` promotes the pending draft to published, superseding the prior published version in the append-only history. Publishing without a pending draft is rejected.
+- **Archive.** `POST /api/glossary/{term_id}/archive` removes a term from approved knowledge while keeping every version in history. Archived terms cannot be revised or published again.
+- **Browse and search.** `GET /api/glossary` searches title, definition, category, and tags case-insensitively, and filters by category. Unpublished status filters require an Administrator viewer, and a draft detail request from a non-Administrator returns `404`, so unpublished knowledge is never exposed across a relationship boundary.
+
+The PWA **Glossary** screen gives every member search and category browse of published terms with version history, and gives Administrators the draft, revision, publish, and archive controls plus development-only authoring. Four framework terms (Clean Burn, The Slag Channel, Furnace Read, Forge Read) are seeded as published knowledge.
 
 ### Milestone 2: Season Design Journey
 

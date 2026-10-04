@@ -43,6 +43,13 @@ type NotificationRecord = {
   created_at: string; status: "delivered" | "in_app" | "digest" | "suppressed"; reason: string | null; push: boolean; deliver_at: string | null;
 };
 type NotificationCenter = { member_id: string; notifications: NotificationRecord[]; total: number; push_enabled: boolean };
+type GlossaryVersion = { version: number; title: string; status: "draft" | "published" | "archived" | "superseded"; drafted_at: string; published_at: string | null };
+type GlossaryTerm = {
+  term_id: string; title: string; definition: string; category: string; tags: string[]; version: number;
+  status: string; term_status: "draft" | "published" | "archived"; has_draft: boolean; published_at: string | null;
+  versions: GlossaryVersion[];
+};
+type GlossaryCatalog = { terms: GlossaryTerm[]; total: number; query: string | null; category: string | null; status: string };
 type OutboxItem = { id: string; endpoint: string; body: unknown; label?: string; queuedAt?: string; status?: "pending" | "rejected"; error?: string; statusCode?: number | null };
 type DeckStep = { section: string; prompt: string; hint?: string; content: ReactNode };
 
@@ -94,6 +101,7 @@ const describeCommand = (endpoint: string): string => {
   if (endpoint.includes("/review")) return "Coach review";
   if (endpoint.includes("/reopen")) return "Revision request";
   if (endpoint.includes("/messages")) return "Channel message";
+  if (endpoint.includes("/glossary")) return "Glossary term";
   if (endpoint.includes("/calibrations")) return "Weekly Calibration";
   if (endpoint.includes("/coach-assignments") || endpoint.includes("/captain-assignments")) return "Assignment";
   if (endpoint.includes("/members")) return "Enroll member";
@@ -432,6 +440,129 @@ function Notifications({ memberId, online, onNotice, onCountChange }: {
   </section>;
 }
 
+function Glossary({ memberId, isAdmin, onNotice }: { memberId: string; isAdmin: boolean; onNotice: (message: string) => void }) {
+  const [catalog, setCatalog] = useState<GlossaryCatalog | null>(null);
+  const [query, setQuery] = useState("");
+  const [category, setCategory] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"published" | "draft" | "archived" | "all">("published");
+  const [detail, setDetail] = useState<GlossaryTerm | null>(null);
+  const [draft, setDraft] = useState({ term_id: "", title: "", definition: "", category: "concept", tags: "" });
+  const [revision, setRevision] = useState<{ title: string; definition: string; category: string; tags: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = async () => {
+    try {
+      const params = new URLSearchParams();
+      if (query.trim()) params.set("q", query.trim());
+      if (category.trim()) params.set("category", category.trim());
+      params.set("status_filter", statusFilter);
+      params.set("viewer_id", memberId);
+      const response = await fetch(`${API}/api/glossary?${params.toString()}`);
+      setCatalog(response.ok ? await response.json() as GlossaryCatalog : { terms: [], total: 0, query: null, category: null, status: statusFilter });
+    } catch { onNotice("Approved glossary knowledge is unavailable while offline."); }
+  };
+  useEffect(() => {
+    const timer = setTimeout(() => { void load(); }, 200);
+    return () => clearTimeout(timer);
+  }, [memberId, statusFilter, query, category]);
+
+  const openTerm = async (termId: string) => {
+    try {
+      const response = await fetch(`${API}/api/glossary/${termId}?viewer_id=${memberId}`);
+      if (!response.ok) throw new Error("unavailable");
+      const term = await response.json() as GlossaryTerm;
+      setDetail(term);
+      setRevision(isAdmin && term.term_status !== "archived" ? { title: term.title, definition: term.definition, category: term.category, tags: term.tags.join(", ") } : null);
+    } catch { onNotice("This glossary term is unavailable."); }
+  };
+
+  const run = async (endpoint: string, body: Record<string, unknown>, success: string) => {
+    setBusy(true);
+    const termId = detail?.term_id;
+    try {
+      const id = commandId();
+      const response = await fetch(`${API}${endpoint}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ command_id: id, ...body }) });
+      if (!response.ok) {
+        let conflict = "The server rejected this command.";
+        try { conflict = (await response.json()).detail ?? conflict; } catch { /* keep fallback detail */ }
+        throw new Error(conflict);
+      }
+      onNotice(success); await load();
+      if (termId) await openTerm(termId);
+    } catch (error) { onNotice(error instanceof Error ? error.message : "Action could not be completed."); }
+    finally { setBusy(false); }
+  };
+
+  const createTerm = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const body = { term_id: draft.term_id, author_id: memberId, title: draft.title, definition: draft.definition, category: draft.category, tags: split(draft.tags) };
+    void run("/api/glossary", body, "Draft term created. Publish it once it is approved.");
+    setDraft({ term_id: "", title: "", definition: "", category: "concept", tags: "" });
+  };
+  const submitRevision = () => {
+    if (!detail || !revision) return;
+    const body = { term_id: detail.term_id, author_id: memberId, title: revision.title, definition: revision.definition, category: revision.category, tags: split(revision.tags) };
+    void run(`/api/glossary/${detail.term_id}/revisions`, body, "Revision drafted. Publish it to make it live.");
+    setRevision(null);
+  };
+  const publish = () => detail && void run(`/api/glossary/${detail.term_id}/publish`, { author_id: memberId }, "Term published to approved knowledge.");
+  const archive = () => detail && void run(`/api/glossary/${detail.term_id}/archive`, { author_id: memberId, reason: "Archived from the approved glossary." }, "Term archived. Its version history is preserved.");
+
+  const statusLabels: Record<string, string> = { published: "Published", draft: "Draft", archived: "Archived", superseded: "Superseded" };
+  return <section className="glossary">
+    <p className="eyebrow">Approved knowledge</p>
+    <h1>Framework language, defined once.</h1>
+    <p className="lead">The glossary is the reviewed source of 3F language. Only published terms are approved knowledge; drafts and archived terms stay with the Administrator.</p>
+
+    <div className="glossary-filters">
+      <label>Search<input value={query} placeholder="Search the glossary..." onChange={(event) => setQuery(event.target.value)} /></label>
+      <label>Category<input value={category} placeholder="scale, practice, concept..." onChange={(event) => setCategory(event.target.value)} /></label>
+      {isAdmin && <label>Status<select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}><option value="published">Published</option><option value="draft">Draft</option><option value="archived">Archived</option><option value="all">All</option></select></label>}
+    </div>
+
+    {!catalog ? <p className="lead">Loading approved terms...</p> : catalog.terms.length === 0
+      ? <p className="lead">No {statusFilter === "published" ? "published" : statusFilter} terms match this search.</p>
+      : <div className="record-list">{catalog.terms.map((term) => <button type="button" className="channel-row" key={term.term_id} onClick={() => void openTerm(term.term_id)}>
+          <div><strong>{term.title}</strong><span>{term.category.replaceAll("_", " ")} · v{term.version}{term.has_draft ? " · draft pending" : ""}</span><p className="glossary-snippet">{term.definition.slice(0, 140)}{term.definition.length > 140 ? "..." : ""}</p></div>
+          <b className={`notif-status ${term.status}`}>{statusLabels[term.status] ?? term.status}</b>
+        </button>)}</div>}
+
+    {detail && <article className="glossary-detail">
+      <div className="notification-head"><strong>v{detail.version} · {statusLabels[detail.term_status] ?? detail.term_status}</strong><button className="back" onClick={() => { setDetail(null); setRevision(null); }}>Close</button></div>
+      <h2>{detail.title}</h2>
+      <p className="lead">{detail.definition}</p>
+      <p className="glossary-meta">{detail.category.replaceAll("_", " ")}{detail.tags.length > 0 ? ` · ${detail.tags.join(", ")}` : ""}</p>
+      <h3>Version history</h3>
+      <ul className="glossary-history">{detail.versions.map((version) => <li key={version.version}><span>v{version.version} · {version.title}</span><b className={`notif-status ${version.status}`}>{statusLabels[version.status] ?? version.status}</b></li>)}</ul>
+      {isAdmin && detail.term_status !== "archived" && <div className="glossary-actions">
+        {detail.has_draft && <button className="primary" disabled={busy} onClick={publish}>Publish draft</button>}
+        <button className="back" disabled={busy} onClick={archive}>Archive</button>
+      </div>}
+      {isAdmin && revision && detail.term_status !== "archived" && <div className="glossary-revision">
+        <p className="eyebrow">Draft a revision</p>
+        <label>Title<input value={revision.title} onChange={(event) => setRevision({ ...revision, title: event.target.value })} /></label>
+        <label>Definition<textarea value={revision.definition} onChange={(event) => setRevision({ ...revision, definition: event.target.value })} /></label>
+        <label>Category<input value={revision.category} onChange={(event) => setRevision({ ...revision, category: event.target.value })} /></label>
+        <label>Tags, comma separated<input value={revision.tags} onChange={(event) => setRevision({ ...revision, tags: event.target.value })} /></label>
+        <button className="back" disabled={busy || revision.definition.trim().length < 10} onClick={submitRevision}>Create revision draft</button>
+      </div>}
+    </article>}
+
+    {isAdmin && <form className="glossary-create" onSubmit={createTerm}>
+      <p className="eyebrow">Development-only administrator authoring</p>
+      <h2>Draft a new term</h2>
+      <div className="setup-grid">
+        <label>Term ID<input required minLength={3} value={draft.term_id} onChange={(event) => setDraft({ ...draft, term_id: event.target.value })} placeholder="refractory-lining" /></label>
+        <label>Title<input required minLength={2} value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} /></label>
+        <label>Category<input required minLength={2} value={draft.category} onChange={(event) => setDraft({ ...draft, category: event.target.value })} /></label>
+        <label>Tags, comma separated<input value={draft.tags} onChange={(event) => setDraft({ ...draft, tags: event.target.value })} placeholder="values, 3f" /></label>
+      </div>
+      <label>Definition<textarea required minLength={10} value={draft.definition} onChange={(event) => setDraft({ ...draft, definition: event.target.value })} /></label>
+      <button className="primary" disabled={busy}>{busy ? "Saving..." : "Create draft"}</button>
+    </form>}
+  </section>;
+}
+
 function AdministratorSetup({ onNotice, onAccountsChanged }: { onNotice: (message: string) => void; onAccountsChanged: () => void }) {
   const [crucibleId, setCrucibleId] = useState("pilot-crucible");
   const [crucible, setCrucible] = useState({ name: "Pilot Crucible", review_week_start: "2026-09-01", refinement_week_start: "2026-09-08", launch_date: "2026-09-15" });
@@ -463,7 +594,7 @@ function AdministratorSetup({ onNotice, onAccountsChanged }: { onNotice: (messag
 }
 
 function App() {
-  const [screen, setScreen] = useState<"anvil" | "plan" | "calibration" | "coach-review" | "administrator-setup" | "channels" | "outbox" | "notifications">("anvil");
+  const [screen, setScreen] = useState<"anvil" | "plan" | "calibration" | "coach-review" | "administrator-setup" | "channels" | "outbox" | "notifications" | "glossary">("anvil");
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [coachRecords, setCoachRecords] = useState<Dashboard[]>([]);
   const [captainRecords, setCaptainRecords] = useState<CaptainCoachStatus[]>([]);
@@ -659,7 +790,7 @@ function App() {
   return <main>
     <header><div className="brand"><span className="mark">3F</span><div><strong>Clean Burn</strong><small>Read. Tell the truth. Strike.</small></div></div><div className={`connection ${online ? "online" : "offline"}`}>{online ? "Online" : "Offline"}</div></header>
     {DEVELOPMENT_MODE && accounts.length > 0 && <label className="account-switcher"><span>Development account</span><select value={activeMemberId} onChange={(event) => switchAccount(event.target.value)}>{accounts.map((account) => <option value={account.member_id} key={account.member_id}>{account.name} · {account.role}</option>)}</select></label>}
-    <nav><button className={screen === "anvil" ? "active" : ""} onClick={() => setScreen("anvil")}>Anvil</button>{isParticipant && <button className={screen === "plan" ? "active" : ""} onClick={() => setScreen("plan")}>Season Plan</button>}{isParticipant && <button className={screen === "calibration" ? "active" : ""} onClick={() => setScreen("calibration")}>Weekly Calibration</button>}{dashboard?.role === "coach" && <button className={screen === "coach-review" ? "active" : ""} onClick={() => setScreen("coach-review")}>Coach review</button>}<button className={screen === "channels" ? "active" : ""} onClick={() => { setActiveChannel(null); setScreen("channels"); void loadChannelInbox(); }}>Channels{channelInbox && channelInbox.unread_total > 0 ? ` · ${channelInbox.unread_total}` : ""}</button><button className={screen === "notifications" ? "active" : ""} onClick={() => setScreen("notifications")}>Notifications{notificationCount > 0 ? ` · ${notificationCount}` : ""}</button>{DEVELOPMENT_MODE && dashboard?.role === "administrator" && <button className={screen === "administrator-setup" ? "active" : ""} onClick={() => setScreen("administrator-setup")}>Setup</button>}<button className={screen === "outbox" ? "active" : ""} onClick={() => setScreen("outbox")}>Outbox{outbox.length > 0 ? ` · ${outbox.length}` : ""}</button></nav>
+    <nav><button className={screen === "anvil" ? "active" : ""} onClick={() => setScreen("anvil")}>Anvil</button>{isParticipant && <button className={screen === "plan" ? "active" : ""} onClick={() => setScreen("plan")}>Season Plan</button>}{isParticipant && <button className={screen === "calibration" ? "active" : ""} onClick={() => setScreen("calibration")}>Weekly Calibration</button>}{dashboard?.role === "coach" && <button className={screen === "coach-review" ? "active" : ""} onClick={() => setScreen("coach-review")}>Coach review</button>}<button className={screen === "channels" ? "active" : ""} onClick={() => { setActiveChannel(null); setScreen("channels"); void loadChannelInbox(); }}>Channels{channelInbox && channelInbox.unread_total > 0 ? ` · ${channelInbox.unread_total}` : ""}</button><button className={screen === "notifications" ? "active" : ""} onClick={() => setScreen("notifications")}>Notifications{notificationCount > 0 ? ` · ${notificationCount}` : ""}</button><button className={screen === "glossary" ? "active" : ""} onClick={() => setScreen("glossary")}>Glossary</button>{DEVELOPMENT_MODE && dashboard?.role === "administrator" && <button className={screen === "administrator-setup" ? "active" : ""} onClick={() => setScreen("administrator-setup")}>Setup</button>}<button className={screen === "outbox" ? "active" : ""} onClick={() => setScreen("outbox")}>Outbox{outbox.length > 0 ? ` · ${outbox.length}` : ""}</button></nav>
     {notice && <aside className="notice">{notice}</aside>}
     {screen === "anvil" && isParticipant && dashboard?.latest_review && <ParticipantReview review={dashboard.latest_review} reopened={Boolean(dashboard?.latest_calibration && dashboard.reopened_weeks?.includes(dashboard.latest_calibration.week))} />}
     {screen === "anvil" && isParticipant && dashboard?.weekly_due && <WeeklyDueState due={dashboard.weekly_due} />}
@@ -672,6 +803,7 @@ function App() {
     {screen === "channels" && <Channels inbox={channelInbox} thread={activeChannel} memberId={activeMemberId} draft={messageDraft} onDraftChange={setMessageDraft} onOpen={(channelId) => void openChannel(channelId)} onBack={() => { setActiveChannel(null); void loadChannelInbox(); }} onSend={() => void sendChannelMessage()} />}
     {screen === "outbox" && <OutboxStatus items={outbox} online={online} onRetry={retryOutboxItem} onRetryAll={retryAllOutbox} onDiscard={discardOutboxItem} />}
     {screen === "notifications" && <Notifications memberId={activeMemberId} online={online} onNotice={setNotice} onCountChange={setNotificationCount} />}
+    {screen === "glossary" && <Glossary memberId={activeMemberId} isAdmin={dashboard?.role === "administrator"} onNotice={setNotice} />}
   </main>;
 }
 

@@ -664,3 +664,131 @@ def test_message_post_generates_generic_social_notifications_idempotently() -> N
 
     # The author is never notified of his own message.
     assert client.get("/api/members/student-cai/notifications").json()["total"] == 0
+
+
+def glossary_term_payload(**overrides: object) -> dict:
+    payload = {
+        "command_id": "glossary-1",
+        "term_id": "refractory-lining",
+        "author_id": "admin-amos",
+        "title": "Refractory Lining",
+        "definition": "The Values section of the 3F read. Values are demonstrated by what is protected under pressure.",
+        "category": "practice",
+        "tags": ["values", "3f"],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_glossary_authoring_lifecycle_and_versions() -> None:
+    client = TestClient(create_app())
+    payload = glossary_term_payload()
+
+    # Only an Administrator can author approved glossary knowledge.
+    assert client.post("/api/glossary", json=payload | {"author_id": "coach-elias"}).status_code == 403
+    assert client.post("/api/glossary", json=payload | {"author_id": "nobody"}).status_code == 404
+
+    created = client.post("/api/glossary", json=payload)
+    assert created.status_code == 201
+    assert created.json()["status"] == "draft"
+    assert created.json()["version"] == 1
+
+    # A draft is not approved knowledge: it is absent from published browse and
+    # its detail is hidden from a regular member.
+    assert "refractory-lining" not in {term["term_id"] for term in client.get("/api/glossary").json()["terms"]}
+    assert client.get("/api/glossary/refractory-lining").status_code == 404
+    assert client.get("/api/glossary/refractory-lining", params={"viewer_id": "demo-member"}).status_code == 404
+
+    # An Administrator sees the draft; only the Administrator can publish it.
+    draft_detail = client.get("/api/glossary/refractory-lining", params={"viewer_id": "admin-amos"}).json()
+    assert draft_detail["term_status"] == "draft"
+    assert [(version["version"], version["status"]) for version in draft_detail["versions"]] == [(1, "draft")]
+    assert client.post("/api/glossary/refractory-lining/publish", json={"author_id": "demo-member"}).status_code == 403
+
+    assert client.post("/api/glossary/refractory-lining/publish", json={"author_id": "admin-amos"}).status_code == 201
+
+    live = client.get("/api/glossary/refractory-lining").json()
+    assert live["status"] == "published"
+    assert live["version"] == 1
+    assert live["tags"] == ["values", "3f"]
+    assert [version["status"] for version in live["versions"]] == ["published"]
+
+    # Publishing twice without a new revision is rejected.
+    assert client.post("/api/glossary/refractory-lining/publish", json={"author_id": "admin-amos"}).status_code == 409
+
+    # A revision drafts a new version while the published version stays live.
+    revision = client.post("/api/glossary/refractory-lining/revisions", json=payload | {
+        "command_id": "glossary-2",
+        "title": "Refractory Lining (Revised)",
+        "definition": "The Values section of the 3F read, revised. Values are demonstrated by what is protected under pressure.",
+    })
+    assert revision.status_code == 201
+    assert revision.json()["version"] == 2
+    assert revision.json()["status"] == "draft"
+
+    still_live = client.get("/api/glossary/refractory-lining").json()
+    assert still_live["version"] == 1
+    assert still_live["title"] == "Refractory Lining"
+    assert still_live["has_draft"] is True
+
+    assert client.post("/api/glossary/refractory-lining/publish", json={"author_id": "admin-amos"}).status_code == 201
+    v2 = client.get("/api/glossary/refractory-lining").json()
+    assert v2["version"] == 2
+    assert v2["title"] == "Refractory Lining (Revised)"
+
+    # Both versions remain in the append-only history, with the earlier one superseded.
+    drafted = [event for event in client.get("/api/events").json() if event["name"] == "GlossaryTermDrafted" and event["payload"]["term_id"] == "refractory-lining"]
+    assert [event["payload"]["version"] for event in drafted] == [1, 2]
+    admin_detail = client.get("/api/glossary/refractory-lining", params={"viewer_id": "admin-amos"}).json()
+    assert [(version["version"], version["status"]) for version in admin_detail["versions"]] == [(1, "superseded"), (2, "published")]
+
+    # Archive removes the term from approved knowledge while retaining history.
+    assert client.post("/api/glossary/refractory-lining/archive", json={"author_id": "demo-member"}).status_code == 403
+    archived = client.post("/api/glossary/refractory-lining/archive", json={
+        "author_id": "admin-amos", "reason": "Superseded by the new framework release.",
+    })
+    assert archived.status_code == 201
+    assert archived.json()["status"] == "archived"
+    assert client.get("/api/glossary/refractory-lining").status_code == 404
+    assert "refractory-lining" not in {term["term_id"] for term in client.get("/api/glossary").json()["terms"]}
+    archived_ids = [term["term_id"] for term in client.get("/api/glossary", params={"status_filter": "archived", "viewer_id": "admin-amos"}).json()["terms"]]
+    assert archived_ids == ["refractory-lining"]
+
+    # An archived term cannot be revised, published, or archived again.
+    assert client.post("/api/glossary/refractory-lining/revisions", json=payload | {"command_id": "glossary-3"}).status_code == 409
+    assert client.post("/api/glossary/refractory-lining/publish", json={"author_id": "admin-amos"}).status_code == 409
+    assert client.post("/api/glossary/refractory-lining/archive", json={"author_id": "admin-amos"}).status_code == 409
+
+
+def test_glossary_browse_search_and_authorization() -> None:
+    client = TestClient(create_app())
+
+    # Seeded, published framework terms are approved knowledge for every member.
+    catalog = client.get("/api/glossary").json()
+    assert catalog["status"] == "published"
+    assert {term["term_id"] for term in catalog["terms"]} == {"clean-burn", "forge-read", "furnace-read", "slag-channel"}
+    assert all(term["status"] == "published" for term in catalog["terms"])
+
+    # Search is case-insensitive across title, definition, category, and tags.
+    assert [term["term_id"] for term in client.get("/api/glossary", params={"q": "FURNACE"}).json()["terms"]] == ["furnace-read"]
+    assert [term["term_id"] for term in client.get("/api/glossary", params={"q": "friction"}).json()["terms"]] == ["slag-channel"]
+    assert [term["term_id"] for term in client.get("/api/glossary", params={"q": "Momentum Scale"}).json()["terms"]] == ["furnace-read"]
+    assert client.get("/api/glossary", params={"q": "no-such-term"}).json()["terms"] == []
+
+    # Category filters narrow the catalog.
+    scales = client.get("/api/glossary", params={"category": "scale"}).json()
+    assert {term["term_id"] for term in scales["terms"]} == {"furnace-read", "forge-read"}
+
+    # Unpublished states require an Administrator viewer.
+    assert client.get("/api/glossary", params={"status_filter": "draft"}).status_code == 403
+    assert client.get("/api/glossary", params={"status_filter": "all", "viewer_id": "demo-member"}).status_code == 403
+    assert client.get("/api/glossary", params={"status_filter": "draft", "viewer_id": "admin-amos"}).status_code == 200
+    assert client.get("/api/glossary", params={"status_filter": "bogus", "viewer_id": "admin-amos"}).status_code == 422
+
+    # A published term is readable by a regular member with its published history.
+    detail = client.get("/api/glossary/clean-burn").json()
+    assert detail["title"] == "Clean Burn"
+    assert detail["version"] == 1
+    assert detail["status"] == "published"
+    assert [version["status"] for version in detail["versions"]] == ["published"]
+    assert client.get("/api/glossary/unknown-term").status_code == 404

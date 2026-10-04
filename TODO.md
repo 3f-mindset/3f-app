@@ -21,7 +21,7 @@ This file is the source of truth for the autonomous delivery loop. Work one item
 
 - [x] **P2 - Add authorized text channels.** Persist messages, unread state, offline sends, and channel relationship authorization.
 - [x] **P2 - Add notification preferences.** Implement device subscriptions, channel mutes, opt-in quiet hours, and timezone-aware reminder policy.
-- [ ] **P3 - Add approved knowledge glossary.** Support draft, publish, archive, version, browse, and search states.
+- [x] **P3 - Add approved knowledge glossary.** Support draft, publish, archive, version, browse, and search states.
 - [ ] **P3 - Add guarded client assistant.** Retrieve only approved knowledge, cite sources, and escalate to the assigned Coach.
 
 ## Definition Of Done
