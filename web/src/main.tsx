@@ -50,6 +50,12 @@ type GlossaryTerm = {
   versions: GlossaryVersion[];
 };
 type GlossaryCatalog = { terms: GlossaryTerm[]; total: number; query: string | null; category: string | null; status: string };
+type AssistantCitation = { term_id: string; title: string; version: number; category: string };
+type AssistantAnswer = {
+  member_id: string; question: string; answer: string; grounded: boolean; citations: AssistantCitation[];
+  retrieved_knowledge_ids: string[]; escalation: { available: boolean; coach_id: string | null; coach_name: string };
+  prompt_version: string; boundaries: string[];
+};
 type OutboxItem = { id: string; endpoint: string; body: unknown; label?: string; queuedAt?: string; status?: "pending" | "rejected"; error?: string; statusCode?: number | null };
 type DeckStep = { section: string; prompt: string; hint?: string; content: ReactNode };
 
@@ -563,6 +569,73 @@ function Glossary({ memberId, isAdmin, onNotice }: { memberId: string; isAdmin: 
   </section>;
 }
 
+function Assistant({ memberId, onNotice }: { memberId: string; onNotice: (message: string) => void }) {
+  const [question, setQuestion] = useState("");
+  const [answer, setAnswer] = useState<AssistantAnswer | null>(null);
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const ask = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (question.trim().length < 3) return;
+    setBusy(true);
+    try {
+      const response = await fetch(`${API}/api/members/${memberId}/assistant/ask`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command_id: commandId(), question: question.trim() }),
+      });
+      if (!response.ok) throw new Error("The assistant is unavailable right now.");
+      setAnswer(await response.json() as AssistantAnswer);
+    } catch (error) { onNotice(error instanceof Error ? error.message : "The assistant is unavailable right now."); }
+    finally { setBusy(false); }
+  };
+  const escalate = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (note.trim().length < 3) return;
+    setBusy(true);
+    try {
+      const response = await fetch(`${API}/api/members/${memberId}/assistant/escalate`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command_id: commandId(), note: note.trim() }),
+      });
+      if (!response.ok) {
+        let detail = "Escalation could not be sent.";
+        try { detail = (await response.json()).detail ?? detail; } catch { /* keep fallback detail */ }
+        throw new Error(detail);
+      }
+      const result = await response.json() as { coach_id: string };
+      onNotice(`Your Coach (${result.coach_id}) has been asked to follow up.`);
+      setNote("");
+    } catch (error) { onNotice(error instanceof Error ? error.message : "Escalation could not be sent."); }
+    finally { setBusy(false); }
+  };
+
+  return <section className="assistant">
+    <p className="eyebrow">Guarded client assistant</p>
+    <h1>Framework guidance, grounded in approved knowledge.</h1>
+    <p className="lead">Ask about 3F language, scales, principles, or practices. The assistant answers only from published glossary terms, cites each source, and routes anything unsupported to your assigned Coach. It never diagnoses, rates, or advises on a personal situation.</p>
+
+    <form className="assistant-ask" onSubmit={(event) => void ask(event)}>
+      <label>Your question<input required minLength={3} value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="What does clean burn mean?" /></label>
+      <button className="primary" disabled={busy || question.trim().length < 3}>Ask the assistant</button>
+    </form>
+
+    {answer && <article className="assistant-answer">
+      <div className="notification-head"><strong>{answer.grounded ? "Grounded in approved knowledge" : "No approved term matched"}</strong><span>prompt v{answer.prompt_version}</span></div>
+      <p>{answer.answer}</p>
+      {answer.citations.length > 0 && <><h3>Sources</h3><ul className="assistant-citations">{answer.citations.map((citation) => <li key={citation.term_id}><b>{citation.title}</b><span>{citation.category.replaceAll("_", " ")} · v{citation.version} · {citation.term_id}</span></li>)}</ul></>}
+      <ul className="assistant-boundaries">{answer.boundaries.map((boundary) => <li key={boundary}>{boundary}</li>)}</ul>
+    </article>}
+
+    <form className="assistant-escalate" onSubmit={(event) => void escalate(event)}>
+      <p className="eyebrow">Escalate to your Coach</p>
+      <p>{answer?.escalation.available ? `Send a note to ${answer.escalation.coach_name}. Your Coach receives a generic alert, not your note text.` : "Escalation is available to participants with an assigned Coach."}</p>
+      <label>Note for your Coach<textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="What do you want your Coach to help you with?" /></label>
+      <button className="primary" disabled={busy || note.trim().length < 3 || !(answer?.escalation.available ?? true)}>Ask my Coach to follow up</button>
+    </form>
+  </section>;
+}
+
 function AdministratorSetup({ onNotice, onAccountsChanged }: { onNotice: (message: string) => void; onAccountsChanged: () => void }) {
   const [crucibleId, setCrucibleId] = useState("pilot-crucible");
   const [crucible, setCrucible] = useState({ name: "Pilot Crucible", review_week_start: "2026-09-01", refinement_week_start: "2026-09-08", launch_date: "2026-09-15" });
@@ -594,7 +667,7 @@ function AdministratorSetup({ onNotice, onAccountsChanged }: { onNotice: (messag
 }
 
 function App() {
-  const [screen, setScreen] = useState<"anvil" | "plan" | "calibration" | "coach-review" | "administrator-setup" | "channels" | "outbox" | "notifications" | "glossary">("anvil");
+  const [screen, setScreen] = useState<"anvil" | "plan" | "calibration" | "coach-review" | "administrator-setup" | "channels" | "outbox" | "notifications" | "glossary" | "assistant">("anvil");
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [coachRecords, setCoachRecords] = useState<Dashboard[]>([]);
   const [captainRecords, setCaptainRecords] = useState<CaptainCoachStatus[]>([]);
@@ -790,7 +863,7 @@ function App() {
   return <main>
     <header><div className="brand"><span className="mark">3F</span><div><strong>Clean Burn</strong><small>Read. Tell the truth. Strike.</small></div></div><div className={`connection ${online ? "online" : "offline"}`}>{online ? "Online" : "Offline"}</div></header>
     {DEVELOPMENT_MODE && accounts.length > 0 && <label className="account-switcher"><span>Development account</span><select value={activeMemberId} onChange={(event) => switchAccount(event.target.value)}>{accounts.map((account) => <option value={account.member_id} key={account.member_id}>{account.name} · {account.role}</option>)}</select></label>}
-    <nav><button className={screen === "anvil" ? "active" : ""} onClick={() => setScreen("anvil")}>Anvil</button>{isParticipant && <button className={screen === "plan" ? "active" : ""} onClick={() => setScreen("plan")}>Season Plan</button>}{isParticipant && <button className={screen === "calibration" ? "active" : ""} onClick={() => setScreen("calibration")}>Weekly Calibration</button>}{dashboard?.role === "coach" && <button className={screen === "coach-review" ? "active" : ""} onClick={() => setScreen("coach-review")}>Coach review</button>}<button className={screen === "channels" ? "active" : ""} onClick={() => { setActiveChannel(null); setScreen("channels"); void loadChannelInbox(); }}>Channels{channelInbox && channelInbox.unread_total > 0 ? ` · ${channelInbox.unread_total}` : ""}</button><button className={screen === "notifications" ? "active" : ""} onClick={() => setScreen("notifications")}>Notifications{notificationCount > 0 ? ` · ${notificationCount}` : ""}</button><button className={screen === "glossary" ? "active" : ""} onClick={() => setScreen("glossary")}>Glossary</button>{DEVELOPMENT_MODE && dashboard?.role === "administrator" && <button className={screen === "administrator-setup" ? "active" : ""} onClick={() => setScreen("administrator-setup")}>Setup</button>}<button className={screen === "outbox" ? "active" : ""} onClick={() => setScreen("outbox")}>Outbox{outbox.length > 0 ? ` · ${outbox.length}` : ""}</button></nav>
+    <nav><button className={screen === "anvil" ? "active" : ""} onClick={() => setScreen("anvil")}>Anvil</button>{isParticipant && <button className={screen === "plan" ? "active" : ""} onClick={() => setScreen("plan")}>Season Plan</button>}{isParticipant && <button className={screen === "calibration" ? "active" : ""} onClick={() => setScreen("calibration")}>Weekly Calibration</button>}{dashboard?.role === "coach" && <button className={screen === "coach-review" ? "active" : ""} onClick={() => setScreen("coach-review")}>Coach review</button>}<button className={screen === "channels" ? "active" : ""} onClick={() => { setActiveChannel(null); setScreen("channels"); void loadChannelInbox(); }}>Channels{channelInbox && channelInbox.unread_total > 0 ? ` · ${channelInbox.unread_total}` : ""}</button><button className={screen === "notifications" ? "active" : ""} onClick={() => setScreen("notifications")}>Notifications{notificationCount > 0 ? ` · ${notificationCount}` : ""}</button><button className={screen === "glossary" ? "active" : ""} onClick={() => setScreen("glossary")}>Glossary</button><button className={screen === "assistant" ? "active" : ""} onClick={() => setScreen("assistant")}>Assistant</button>{DEVELOPMENT_MODE && dashboard?.role === "administrator" && <button className={screen === "administrator-setup" ? "active" : ""} onClick={() => setScreen("administrator-setup")}>Setup</button>}<button className={screen === "outbox" ? "active" : ""} onClick={() => setScreen("outbox")}>Outbox{outbox.length > 0 ? ` · ${outbox.length}` : ""}</button></nav>
     {notice && <aside className="notice">{notice}</aside>}
     {screen === "anvil" && isParticipant && dashboard?.latest_review && <ParticipantReview review={dashboard.latest_review} reopened={Boolean(dashboard?.latest_calibration && dashboard.reopened_weeks?.includes(dashboard.latest_calibration.week))} />}
     {screen === "anvil" && isParticipant && dashboard?.weekly_due && <WeeklyDueState due={dashboard.weekly_due} />}
@@ -804,6 +877,7 @@ function App() {
     {screen === "outbox" && <OutboxStatus items={outbox} online={online} onRetry={retryOutboxItem} onRetryAll={retryAllOutbox} onDiscard={discardOutboxItem} />}
     {screen === "notifications" && <Notifications memberId={activeMemberId} online={online} onNotice={setNotice} onCountChange={setNotificationCount} />}
     {screen === "glossary" && <Glossary memberId={activeMemberId} isAdmin={dashboard?.role === "administrator"} onNotice={setNotice} />}
+    {screen === "assistant" && <Assistant memberId={activeMemberId} onNotice={setNotice} />}
   </main>;
 }
 

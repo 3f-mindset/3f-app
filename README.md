@@ -361,6 +361,8 @@ It cannot:
 
 AI interactions retain an audit record of prompt version, retrieved knowledge IDs, output, and escalation action. Human-approved Coach-facing summaries and automation agents are deferred until the core workflow produces enough evidence to evaluate them safely.
 
+The local implementation is a **deterministic retrieval assistant**, not a generative model. `POST /api/members/{member_id}/assistant/ask` ranks the currently published glossary versions by keyword overlap with the question and composes the answer **verbatim** from those approved definitions, citing each `term_id` and version. Only published terms are eligible, so drafts, unpublished revisions, and archived terms can never ground an answer. When nothing matches, the assistant declines and points to the assigned Coach rather than inventing guidance. `POST /api/members/{member_id}/assistant/escalate` routes a note to the participant's assigned Coach as an `AssistantEscalated` event and a generic `assistant_escalation` workflow notice that never contains the note text. Every ask appends an `AssistantAnswered` event, and `GET /api/members/{member_id}/assistant` returns the member's own interaction history. This keeps the "no autonomous judgment, diagnosis, or personal recommendation" boundary enforceable by construction until a managed model is wired behind the same port.
+
 ## Technical Architecture
 
 ### Stack
@@ -417,6 +419,8 @@ Representative events:
 - `GlossaryTermDrafted`
 - `GlossaryTermPublished`
 - `GlossaryTermArchived`
+- `AssistantAnswered`
+- `AssistantEscalated`
 
 ## Privacy And Safety
 
@@ -467,6 +471,7 @@ The local event-sourced API now supports the foundation of this milestone:
 - `POST /api/members/{member_id}/notifications` to evaluate and record a notification, and `GET /api/members/{member_id}/notifications` for the in-app notification center.
 - `GET /api/glossary` and `GET /api/glossary/{term_id}` for approved knowledge browse, search, category filters, and version detail.
 - `POST /api/glossary`, `/api/glossary/{term_id}/revisions`, `/api/glossary/{term_id}/publish`, and `/api/glossary/{term_id}/archive` for Administrator glossary authoring.
+- `POST /api/members/{member_id}/assistant/ask` for grounded answers composed only from published glossary terms with citations, `POST /api/members/{member_id}/assistant/escalate` for an assigned-Coach escalation, and `GET /api/members/{member_id}/assistant` for the member's audit history.
 
 The POC validates that buddy pairs have two members, triads have three, Coach sponsors are Coaches in the same Crucible, circle channels match their circle membership, participant-private channels exclude Coaches and Captains, and Captain visibility is limited to assigned Coach status without participant calibration content.
 
@@ -519,6 +524,18 @@ The glossary is the reviewed source of 3F framework language. Only **published**
 - **Browse and search.** `GET /api/glossary` searches title, definition, category, and tags case-insensitively, and filters by category. Unpublished status filters require an Administrator viewer, and a draft detail request from a non-Administrator returns `404`, so unpublished knowledge is never exposed across a relationship boundary.
 
 The PWA **Glossary** screen gives every member search and category browse of published terms with version history, and gives Administrators the draft, revision, publish, and archive controls plus development-only authoring. Four framework terms (Clean Burn, The Slag Channel, Furnace Read, Forge Read) are seeded as published knowledge.
+
+### Guarded Client Assistant
+
+The client assistant is an approved-framework guide, not an autonomous coach. It answers only from the same published glossary knowledge that every member can already read, so retrieval cannot cross an authorization boundary.
+
+- **Grounded retrieval.** `POST /api/members/{member_id}/assistant/ask` tokenizes the question (ignoring stopwords), scores the live published version of each term on its title, definition, category, and tags, and returns at most three sources. The answer is assembled verbatim from those definitions with an explicit note that it is framework language, not diagnosis or personal advice.
+- **Published knowledge only.** Draft terms, unpublished revisions, and archived terms are never eligible, so in-progress authoring is invisible to the assistant. An ungrounded question is declined rather than answered speculatively.
+- **Cited sources.** Every answer returns `citations` with `term_id`, `title`, `version`, and `category`, plus `retrieved_knowledge_ids`, so a member can trace each statement to approved knowledge.
+- **Coach escalation.** `POST /api/members/{member_id}/assistant/escalate` requires a participant with an assigned Coach. It appends an `AssistantEscalated` event and delivers a generic `assistant_escalation` workflow notice to the Coach without the participant's note text, mirroring the privacy rule for channel pushes.
+- **Audit record.** Every ask appends an `AssistantAnswered` event carrying `prompt_version`, `retrieved_knowledge_ids`, the composed answer, and whether escalation was available. `GET /api/members/{member_id}/assistant` returns the member's own interaction history.
+
+The PWA **Assistant** screen asks a question, shows the grounded answer with its citations and guardrail boundaries, and lets the member escalate a note to the assigned Coach. No generative model is wired in yet; the deterministic behavior makes the no-judgment boundary a structural guarantee rather than a prompt convention.
 
 ### Milestone 2: Season Design Journey
 

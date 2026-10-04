@@ -109,9 +109,23 @@ NOTIFICATION_TYPES: dict[str, dict[str, Any]] = {
     "calibration_reminder": {"category": "workflow"},
     "review_rhythm": {"category": "workflow"},
     "review_workflow": {"category": "workflow"},
+    "assistant_escalation": {"category": "workflow"},
     "channel_message": {"category": "social"},
 }
 NOTIFICATION_STATUSES = ("delivered", "in_app", "digest", "suppressed")
+
+# The guarded client assistant retrieves only published, approved glossary
+# knowledge, cites every source, and escalates to the assigned Coach. It never
+# generates judgment, diagnosis, or personal recommendations: every grounded
+# answer is composed verbatim from approved definitions.
+ASSISTANT_PROMPT_VERSION = "1"
+ASSISTANT_MAX_SOURCES = 3
+ASSISTANT_STOPWORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "by", "can", "do", "does", "for", "from",
+    "how", "i", "in", "is", "it", "me", "my", "of", "on", "or", "should", "so", "that",
+    "the", "their", "them", "this", "to", "was", "were", "what", "when", "where", "which",
+    "who", "why", "will", "with", "you", "your",
+})
 
 # Approved glossary terms move through a draft, published, archived lifecycle.
 # Superseded marks a version kept for history once a newer version replaces it.
@@ -260,6 +274,60 @@ def evaluate_notification_delivery(
     if not any(device.get("enabled") for device in devices.values()):
         return {"status": "in_app", "reason": "no_device", "push": False, "deliver_at": None}
     return {"status": "delivered", "reason": None, "push": True, "deliver_at": None}
+
+
+def published_glossary_version(term: dict[str, Any]) -> dict[str, Any] | None:
+    return next((version for version in reversed(term["versions"]) if version["status"] == "published"), None)
+
+
+def assistant_query_tokens(question: str) -> list[str]:
+    cleaned = "".join(character if character.isalnum() or character.isspace() else " " for character in question.lower())
+    return [token for token in cleaned.split() if len(token) > 1 and token not in ASSISTANT_STOPWORDS]
+
+
+def match_approved_knowledge(question: str, terms: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rank currently published glossary versions by keyword overlap with a question.
+
+    Only the live published version of each term is eligible, so drafts,
+    revisions, and archived terms can never ground an assistant answer.
+    """
+    tokens = assistant_query_tokens(question)
+    if not tokens:
+        return []
+    scored: list[tuple[int, str, dict[str, Any]]] = []
+    for term in terms:
+        version = published_glossary_version(term)
+        if version is None:
+            continue
+        haystack = " ".join([version["title"], version["definition"], version["category"], *version["tags"]]).lower()
+        score = sum(1 for token in tokens if token in haystack)
+        if score > 0:
+            scored.append((score, term["term_id"], version))
+    scored.sort(key=lambda item: (-item[0], item[2]["title"].lower()))
+    return [
+        {
+            "term_id": term_id,
+            "title": version["title"],
+            "version": version["version"],
+            "definition": version["definition"],
+            "category": version["category"],
+            "tags": list(version["tags"]),
+        }
+        for _, term_id, version in scored[:ASSISTANT_MAX_SOURCES]
+    ]
+
+
+def compose_assistant_answer(sources: list[dict[str, Any]]) -> str | None:
+    """Compose an answer strictly from approved definitions, or None if ungrounded."""
+    if not sources:
+        return None
+    body = "\n\n".join(f"{source['title']} (v{source['version']}): {source['definition']}" for source in sources)
+    return (
+        "Here is the approved 3F framework language that relates to your question:\n\n"
+        f"{body}\n\n"
+        "This is reviewed framework language only. It is not diagnosis, a scale rating, or a personal "
+        "recommendation. Your assigned Coach can help you apply it to your own week."
+    )
 
 
 @dataclass(frozen=True)
@@ -578,6 +646,16 @@ class GlossaryActionCommand(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
 
 
+class AssistantQuestionCommand(BaseModel):
+    command_id: str = Field(default_factory=lambda: str(uuid4()))
+    question: str = Field(min_length=3, max_length=500)
+
+
+class AssistantEscalationCommand(BaseModel):
+    command_id: str = Field(default_factory=lambda: str(uuid4()))
+    note: str = Field(min_length=3, max_length=1000)
+
+
 @dataclass
 class MemberProjection:
     member_id: str
@@ -595,6 +673,7 @@ class MemberProjection:
     notification_devices: dict[str, dict[str, Any]] = field(default_factory=dict)
     channel_mutes: dict[str, dict[str, Any]] = field(default_factory=dict)
     notifications: list[dict[str, Any]] = field(default_factory=list)
+    assistant_history: list[dict[str, Any]] = field(default_factory=list)
 
 
 class ReadModel:
@@ -699,6 +778,8 @@ class ReadModel:
                 mutes.pop(payload["channel_id"], None)
         elif event.name in ("NotificationScheduled", "NotificationSuppressed"):
             self.member(payload["member_id"]).notifications.append(payload)
+        elif event.name in ("AssistantAnswered", "AssistantEscalated"):
+            self.member(payload["member_id"]).assistant_history.append(payload)
 
 
 class ApplicationService:
@@ -1406,6 +1487,86 @@ class ApplicationService:
         ]
         return result
 
+    def _assistant_escalation(self, member: MemberProjection) -> dict[str, Any]:
+        coach = self.read_model.members.get(member.coach_id) if member.coach_id else None
+        available = member.role == ProgramRole.PARTICIPANT and coach is not None
+        return {
+            "available": available,
+            "coach_id": member.coach_id if available else None,
+            "coach_name": coach.name if available else "",
+        }
+
+    def ask_assistant(self, member_id: str, command: AssistantQuestionCommand) -> dict[str, Any]:
+        member = self.member_or_404(member_id)
+        sources = match_approved_knowledge(command.question, list(self.read_model.glossary_terms.values()))
+        answer = compose_assistant_answer(sources)
+        grounded = answer is not None
+        escalation = self._assistant_escalation(member)
+        payload = {
+            "member_id": member.member_id,
+            "question": command.question,
+            "prompt_version": ASSISTANT_PROMPT_VERSION,
+            "answer": answer,
+            "grounded": grounded,
+            "retrieved_knowledge_ids": [source["term_id"] for source in sources],
+            "citations": [
+                {"term_id": source["term_id"], "title": source["title"], "version": source["version"], "category": source["category"]}
+                for source in sources
+            ],
+            "escalation_available": escalation["available"],
+            "answered_at": self._clock().isoformat(),
+        }
+        events = self._append(f"assistant:{member.member_id}", command.command_id, "AssistantAnswered", payload)
+        return {
+            "event_ids": [event.id for event in events],
+            "member_id": member.member_id,
+            "question": command.question,
+            "answer": answer or "I only answer from approved 3F framework language, and no published term matches this question. Ask your assigned Coach for help.",
+            "grounded": grounded,
+            "citations": payload["citations"],
+            "retrieved_knowledge_ids": payload["retrieved_knowledge_ids"],
+            "escalation": escalation,
+            "prompt_version": ASSISTANT_PROMPT_VERSION,
+            "boundaries": [
+                "Answers quote approved framework knowledge only.",
+                "No diagnosis, scale rating, or personal recommendation is generated.",
+                "Unsupported questions are routed to the assigned Coach.",
+            ],
+        }
+
+    def escalate_to_coach(self, member_id: str, command: AssistantEscalationCommand) -> dict[str, Any]:
+        member = self.member_or_404(member_id)
+        if member.role != ProgramRole.PARTICIPANT or not member.coach_id:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Escalation requires a participant with an assigned Coach.")
+        coach = self.member_or_404(member.coach_id)
+        payload = {
+            "member_id": member.member_id,
+            "coach_id": coach.member_id,
+            "note": command.note,
+            "prompt_version": ASSISTANT_PROMPT_VERSION,
+            "escalated_at": self._clock().isoformat(),
+        }
+        events = self._append(f"assistant:{member.member_id}", command.command_id, "AssistantEscalated", payload)
+        decision = self._record_notification(
+            command_id=f"{command.command_id}:notify",
+            member_id=coach.member_id,
+            notification_type="assistant_escalation",
+            title=f"{member.name} requested Coach support",
+            body=f"{member.name} asked for Coach help through the 3F assistant. Open 3F to follow up.",
+        )
+        return {
+            "event_ids": [event.id for event in events],
+            "status": "escalated",
+            "member_id": member.member_id,
+            "coach_id": coach.member_id,
+            "notification_status": decision["status"],
+        }
+
+    def assistant_history(self, member_id: str) -> dict[str, Any]:
+        member = self.member_or_404(member_id)
+        interactions = list(reversed(member.assistant_history))
+        return {"member_id": member.member_id, "interactions": interactions, "total": len(interactions)}
+
     def crucible_or_404(self, crucible_id: str) -> dict[str, Any]:
         if crucible_id not in self.read_model.crucibles:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Crucible not found.")
@@ -1590,6 +1751,18 @@ def create_app(development_mode: bool | None = None, clock: Callable[[], datetim
     @app.post("/api/glossary/{term_id}/archive", status_code=status.HTTP_201_CREATED)
     def archive_glossary_term(term_id: str, command: GlossaryActionCommand) -> dict[str, Any]:
         return service.archive_glossary_term(term_id, command)
+
+    @app.post("/api/members/{member_id}/assistant/ask", status_code=status.HTTP_201_CREATED)
+    def ask_assistant(member_id: str, command: AssistantQuestionCommand) -> dict[str, Any]:
+        return service.ask_assistant(member_id, command)
+
+    @app.post("/api/members/{member_id}/assistant/escalate", status_code=status.HTTP_201_CREATED)
+    def escalate_to_coach(member_id: str, command: AssistantEscalationCommand) -> dict[str, Any]:
+        return service.escalate_to_coach(member_id, command)
+
+    @app.get("/api/members/{member_id}/assistant")
+    def assistant_history(member_id: str) -> dict[str, Any]:
+        return service.assistant_history(member_id)
 
     @app.get("/api/events")
     def events() -> list[dict[str, Any]]:

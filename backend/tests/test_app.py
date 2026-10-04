@@ -792,3 +792,135 @@ def test_glossary_browse_search_and_authorization() -> None:
     assert detail["status"] == "published"
     assert [version["status"] for version in detail["versions"]] == ["published"]
     assert client.get("/api/glossary/unknown-term").status_code == 404
+
+
+def test_guarded_assistant_answers_only_from_published_knowledge() -> None:
+    client = TestClient(create_app())
+    response = client.post("/api/members/demo-member/assistant/ask", json={
+        "command_id": "ask-clean-burn", "question": "What does clean burn mean?",
+    })
+    assert response.status_code == 201
+    answer = response.json()
+    assert answer["grounded"] is True
+    assert answer["retrieved_knowledge_ids"] == ["clean-burn"]
+    assert answer["citations"] == [{"term_id": "clean-burn", "title": "Clean Burn", "version": 1, "category": "concept"}]
+    # The answer quotes the approved definition verbatim and adds no judgment.
+    assert "Clean Burn (v1):" in answer["answer"]
+    assert "reducing internal buildup" in answer["answer"]
+    assert "not diagnosis, a scale rating, or a personal recommendation" in answer["answer"]
+    assert answer["prompt_version"] == "1"
+    assert answer["escalation"] == {"available": True, "coach_id": "coach-elias", "coach_name": "Coach Elias"}
+    assert answer["boundaries"] == [
+        "Answers quote approved framework knowledge only.",
+        "No diagnosis, scale rating, or personal recommendation is generated.",
+        "Unsupported questions are routed to the assigned Coach.",
+    ]
+
+
+def test_guarded_assistant_declines_ungrounded_questions() -> None:
+    client = TestClient(create_app())
+    response = client.post("/api/members/demo-member/assistant/ask", json={
+        "command_id": "ask-ungrounded", "question": "Should I get divorced this year?",
+    })
+    assert response.status_code == 201
+    answer = response.json()
+    assert answer["grounded"] is False
+    assert answer["citations"] == []
+    assert answer["retrieved_knowledge_ids"] == []
+    assert "no published term matches this question" in answer["answer"]
+    assert answer["escalation"]["available"] is True
+
+
+def test_assistant_never_retrieves_unpublished_knowledge() -> None:
+    client = TestClient(create_app())
+
+    # A draft term with distinctive vocabulary is not approved knowledge.
+    assert client.post("/api/glossary", json=glossary_term_payload(
+        command_id="assistant-draft", term_id="alpha-secret", title="Alpha Secret Doctrine",
+        definition="Zephyrquill is an unreleased framework concept kept out of approved knowledge.",
+        category="concept", tags=["zephyrquill"],
+    )).status_code == 201
+    draft_ask = client.post("/api/members/demo-member/assistant/ask", json={
+        "command_id": "ask-draft", "question": "Tell me about zephyrquill.",
+    }).json()
+    assert draft_ask["grounded"] is False
+    assert draft_ask["retrieved_knowledge_ids"] == []
+
+    # An unpublished revision is withheld while the live published version grounds.
+    assert client.post("/api/glossary/clean-burn/revisions", json=glossary_term_payload(
+        command_id="assistant-revision", term_id="clean-burn", title="Clean Burn Revised",
+        definition="Cinderbolt is the revised clean-burn language awaiting publication.",
+        category="concept", tags=["revision"],
+    )).status_code == 201
+    revised = client.post("/api/members/demo-member/assistant/ask", json={
+        "command_id": "ask-revision", "question": "What is cinderbolt?",
+    }).json()
+    assert revised["grounded"] is False
+    live = client.post("/api/members/demo-member/assistant/ask", json={
+        "command_id": "ask-live", "question": "Explain clean burn.",
+    }).json()
+    assert live["retrieved_knowledge_ids"] == ["clean-burn"]
+    assert "reducing internal buildup" in live["answer"]
+
+
+def test_assistant_escalation_routes_to_assigned_coach_without_leaking_notes() -> None:
+    client = TestClient(create_app())
+    escalated = client.post("/api/members/demo-member/assistant/escalate", json={
+        "command_id": "escalate-1", "note": "I want help applying the furnace read to my week.",
+    })
+    assert escalated.status_code == 201
+    assert escalated.json()["status"] == "escalated"
+    assert escalated.json()["coach_id"] == "coach-elias"
+
+    # The Coach receives a generic workflow notice, never the participant's note.
+    center = client.get("/api/members/coach-elias/notifications").json()
+    assert center["total"] == 1
+    notice = center["notifications"][0]
+    assert notice["notification_type"] == "assistant_escalation"
+    assert notice["category"] == "workflow"
+    assert "Marcus" in notice["body"]
+    assert "furnace read" not in notice["body"]
+
+    # Replaying the escalation is idempotent for both the event and the notice.
+    assert client.post("/api/members/demo-member/assistant/escalate", json={
+        "command_id": "escalate-1", "note": "I want help applying the furnace read to my week.",
+    }).status_code == 201
+    event_names = [event["name"] for event in client.get("/api/events").json()]
+    assert event_names.count("AssistantEscalated") == 1
+    assert event_names.count("NotificationScheduled") == 1
+
+    # A member without an assigned Coach, a non-participant, and an unknown member
+    # cannot escalate.
+    assert client.post("/api/crucibles/demo-crucible/members", json={
+        "command_id": "lonely", "member_id": "participant-lonely", "name": "Lonely", "role": "participant",
+    }).status_code == 201
+    assert client.post("/api/members/participant-lonely/assistant/escalate", json={
+        "command_id": "escalate-2", "note": "No coach assigned yet.",
+    }).status_code == 422
+    assert client.post("/api/members/coach-elias/assistant/escalate", json={
+        "command_id": "escalate-3", "note": "Coaches do not escalate to themselves.",
+    }).status_code == 422
+    assert client.post("/api/members/unknown/assistant/escalate", json={
+        "command_id": "escalate-4", "note": "Unknown member.",
+    }).status_code == 404
+
+
+def test_assistant_records_audit_trail_and_member_history() -> None:
+    client = TestClient(create_app())
+    assert client.post("/api/members/demo-member/assistant/ask", json={
+        "command_id": "audit-ask", "question": "What is the slag channel?",
+    }).status_code == 201
+
+    answered = next(event for event in client.get("/api/events").json() if event["name"] == "AssistantAnswered")
+    assert answered["payload"]["prompt_version"] == "1"
+    assert answered["payload"]["grounded"] is True
+    assert answered["payload"]["retrieved_knowledge_ids"] == ["slag-channel"]
+
+    history = client.get("/api/members/demo-member/assistant").json()
+    assert history["total"] == 1
+    assert history["interactions"][0]["question"] == "What is the slag channel?"
+    assert history["interactions"][0]["citations"][0]["term_id"] == "slag-channel"
+
+    # History is relationship-scoped and rejects unknown members.
+    assert client.get("/api/members/coach-elias/assistant").json()["total"] == 0
+    assert client.get("/api/members/unknown/assistant").status_code == 404
