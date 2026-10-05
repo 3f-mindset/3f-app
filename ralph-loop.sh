@@ -29,6 +29,17 @@ RUN_DIR="$ROOT/ralph/runs"
 
 mkdir -p "$RUN_DIR"
 
+# Disable opencode snapshots for harness runs. A snapshot embeds a full git diff
+# of every changed file in each message.updated event; a cycle that touches
+# node_modules or thousands of files writes multi-MB events and bloats the
+# session database. See the ralph skill / global AGENTS.md.
+RALPH_OPENCODE_CONFIG="${RALPH_OPENCODE_CONFIG:-$HOME/.config/opencode/ralph-harness.json}"
+if [[ ! -f "$RALPH_OPENCODE_CONFIG" ]]; then
+  mkdir -p "$(dirname "$RALPH_OPENCODE_CONFIG")"
+  printf '{"$schema":"https://opencode.ai/config.json","snapshot":false}\n' > "$RALPH_OPENCODE_CONFIG"
+fi
+export OPENCODE_CONFIG="$RALPH_OPENCODE_CONFIG"
+
 if ! command -v opencode >/dev/null 2>&1; then
   printf 'opencode CLI is required but was not found on PATH.\n' >&2
   exit 1
